@@ -2,7 +2,7 @@
   "type": "module",
   "name": "@heroku/heroku-credential-manager",
   "version": "0.0.0",
-  "description": "",
+  "description": "Heroku credential management for the CLI",
   "author": "Heroku",
   "repository": {
     "type": "git",

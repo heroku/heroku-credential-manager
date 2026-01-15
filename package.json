@@ -2,7 +2,7 @@
   "type": "module",
   "name": "@heroku/heroku-credential-manager",
   "version": "0.0.0",
-  "description": "",
+  "description": "Heroku credential management for the CLI",
   "author": "Heroku",
   "repository": {
     "type": "git",
@@ -14,6 +14,7 @@
     "dist"
   ],
   "devDependencies": {
+    "@heroku-cli/test-utils": "0.1.1",
     "@types/chai": "^4.3.13",
     "@types/chai-as-promised": "^8.0.2",
     "@types/mocha": "^10.0.10",
@@ -28,12 +29,11 @@
     "eslint-config-oclif-typescript": "^3.1.14",
     "eslint-plugin-import": "^2.31.0",
     "eslint-plugin-mocha": "^10.4.3",
-    "mocha": "^10.8.2",
+    "mocha": "^11.7.5",
     "sinon": "^18.0.1",
     "sinon-chai": "^3.7.0",
     "ts-node": "^10.9.2",
-    "tsconfig-paths": "^4.2.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.9.3"
   },
   "dependencies": {
   },
@@ -44,7 +44,6 @@
     "build": "npm run clean && tsc",
     "clean": "rm -rf dist",
     "lint": "eslint . --ext .ts --config .eslintrc.cjs",
-    "prepare": "npm run build",
     "test": "c8 mocha --forbid-only \"test/**/*.test.ts\"",
     "test:local": "c8 mocha \"${npm_config_file:-test/**/*.test.+(ts|tsx)}\""
   }

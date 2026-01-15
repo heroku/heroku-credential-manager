@@ -7,15 +7,14 @@ jobs:
     strategy:
       matrix:
         node-version: [20.x, 22.x]
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [sfdc-hk-ubuntu-latest, sfdc-hk-macos-latest, sfdc-hk-windows-latest]
     steps:
       - uses: actions/checkout@v6
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
-      - run: npm ci
       - name: unit tests
-        run: npm test
+        run: npm run test
       - name: linting
-        run: yarn lint
+        run: npm run lint

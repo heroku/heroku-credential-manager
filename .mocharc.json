@@ -1,7 +1,6 @@
 {
   "require": [
-    "ts-node/esm",
-    "test/hooks.ts"
+    "ts-node/esm"
   ],
   "watch-extensions": ["ts"],
   "recursive": true,

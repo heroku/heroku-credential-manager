@@ -26,7 +26,6 @@ const configureGpgMock = async () => {
 describe('netrc', () => {
   beforeEach(async () => {
     fs.mkdirpSync('tmp')
-    await configureGpgMock()
   })
 
   afterEach(() => {
@@ -160,7 +159,8 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
 =PGaL
 -----END PGP MESSAGE-----`
 
-  skipOnWindows('synchronously decrypts gpg-encrypted netrc file', () => {
+  skipOnWindows('synchronously decrypts gpg-encrypted netrc file', async () => {
+    await configureGpgMock()
     const f = 'tmp/netrc.gpg'
     fs.writeFileSync(f, gpgEncrypted)
     const netrc = new Netrc(f)
@@ -175,6 +175,7 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
   })
 
   skipOnWindows('asynchronously decrypts gpg-encrypted netrc file', async () => {
+    await configureGpgMock()
     const f = 'tmp/netrc.gpg'
     await fs.writeFile(f, gpgEncrypted)
     const netrc = new Netrc(f)

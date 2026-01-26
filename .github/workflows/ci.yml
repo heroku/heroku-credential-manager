@@ -1,5 +1,5 @@
 name: Test
-on: [push, pull_request, workflow_dispatch]
+on: push
 
 jobs:
   test:
@@ -7,7 +7,7 @@ jobs:
     strategy:
       matrix:
         node-version: [20.x, 22.x]
-        os: [sfdc-hk-ubuntu-latest, sfdc-hk-macos-latest, sfdc-hk-windows-latest]
+        os: [sfdc-hk-ubuntu-latest, sfdc-hk-windows-latest, sfdc-hk-macos-latest]
     steps:
       - uses: actions/checkout@v6
       - name: Use Node.js ${{ matrix.node-version }}

@@ -9,6 +9,8 @@ process.env.NETRC_PARSER_DEBUG = '1'
 const skipOnWindows = process.platform === 'win32' ? it.skip : it
 
 const configureGpgMock = async () => {
+  const gpgVersion = await execa('gpg', ['--version'])
+  console.log(gpgVersion)
   // Create and set temp gpg home directory
   const mockGnupgHome = 'tmp/gpg'
   fs.mkdirpSync(mockGnupgHome)

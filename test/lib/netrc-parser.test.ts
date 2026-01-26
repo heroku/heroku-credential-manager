@@ -1,5 +1,5 @@
 import {expect} from 'chai'
-import {execa} from 'execa'
+import {ExecaError, execa} from 'execa'
 import fs from 'fs-extra'
 
 import {Netrc} from '../../src/lib/netrc-parser.js'
@@ -9,8 +9,13 @@ process.env.NETRC_PARSER_DEBUG = '1'
 const skipOnWindows = process.platform === 'win32' ? it.skip : it
 
 const configureGpgMock = async () => {
-  const gpgVersion = await execa('gpg', ['--version'])
-  console.log(gpgVersion)
+  // install gpg if not already installed
+  await execa('gpg', ['--version']).catch(async error => {
+    if (error instanceof ExecaError && error.code === 'ENOENT' && process.platform === 'darwin') {
+      console.log('installing gpg via homebrew')
+      await execa('brew', ['install', 'gpg'])
+    }
+  })
   // Create and set temp gpg home directory
   const mockGnupgHome = 'tmp/gpg'
   fs.mkdirpSync(mockGnupgHome)
@@ -162,8 +167,13 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
 -----END PGP MESSAGE-----`
 
   // eslint-disable-next-line mocha/no-setup-in-describe
-  skipOnWindows('synchronously decrypts gpg-encrypted netrc file', async () => {
-    await configureGpgMock()
+  skipOnWindows('synchronously decrypts gpg-encrypted netrc file', async function () {
+    await configureGpgMock().catch(error => {
+      if (error instanceof ExecaError && error.code === 'ENOENT') {
+        console.log('GPG not found, skipping test')
+        return this.skip()
+      }
+    })
     const f = 'tmp/netrc.gpg'
     fs.writeFileSync(f, gpgEncrypted)
     const netrc = new Netrc(f)
@@ -178,8 +188,13 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
   })
 
   // eslint-disable-next-line mocha/no-setup-in-describe
-  skipOnWindows('asynchronously decrypts gpg-encrypted netrc file', async () => {
-    await configureGpgMock()
+  skipOnWindows('asynchronously decrypts gpg-encrypted netrc file', async function () {
+    await configureGpgMock().catch(error => {
+      if (error instanceof ExecaError && error.code === 'ENOENT') {
+        console.log('GPG not found, skipping test')
+        return this.skip()
+      }
+    })
     const f = 'tmp/netrc.gpg'
     await fs.writeFile(f, gpgEncrypted)
     const netrc = new Netrc(f)

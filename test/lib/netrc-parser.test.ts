@@ -1,5 +1,5 @@
-import {execa} from 'execa'
 import {expect} from 'chai'
+import {execa} from 'execa'
 import fs from 'fs-extra'
 
 import {Netrc} from '../../src/lib/netrc-parser.js'
@@ -23,29 +23,29 @@ const configureGpgMock = async () => {
   )
 }
 
-describe('netrc', () => {
-  beforeEach(async () => {
+describe('netrc', function () {
+  beforeEach(async function () {
     fs.mkdirpSync('tmp')
   })
 
-  afterEach(() => {
+  afterEach(function () {
     fs.removeSync('tmp')
     delete process.env.GNUPGHOME
   })
 
-  it('can read system netrc', () => {
-    let netrc = new Netrc()
+  it('can read system netrc', function () {
+    const netrc = new Netrc()
     netrc.loadSync()
-    expect(!!netrc.machines).to.be.true
+    expect(Boolean(netrc.machines)).to.be.true
   })
 
-  it('can read system netrc async', async () => {
-    let netrc = new Netrc()
+  it('can read system netrc async', async function () {
+    const netrc = new Netrc()
     await netrc.load()
-    expect(!!netrc.machines).to.be.true
+    expect(Boolean(netrc.machines)).to.be.true
   })
 
-  it('reads basic', () => {
+  it('reads basic', function () {
     const f = 'tmp/netrc'
     fs.writeFileSync(
       f,
@@ -66,7 +66,7 @@ machine ray login demo password mypassword`,
     expect(netrc.machines.ray.password).to.equal('mypassword')
   })
 
-  it('bad default order', () => {
+  it('bad default order', function () {
     const f = 'tmp/netrc'
     fs.writeFileSync(
       f,
@@ -95,7 +95,7 @@ machine ray login demo password mypassword
     expect(netrc.machines.ray.password).to.equal('mypassword')
   })
 
-  it('it loads the netrc file with comments', () => {
+  it('it loads the netrc file with comments', function () {
     const f = 'tmp/netrc'
     fs.writeFileSync(
       f,
@@ -109,7 +109,7 @@ machine ray login demo password mypassword
     expect(netrc.machines['api.dickeyxxx.com'].password).to.equal('myapikey')
   })
 
-  it('finds the login, account, and password with odd characters, comments, and trailing spaces', () => {
+  it('finds the login, account, and password with odd characters, comments, and trailing spaces', function () {
     const f = 'tmp/netrc'
     fs.writeFileSync(
       f,
@@ -159,6 +159,7 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
 =PGaL
 -----END PGP MESSAGE-----`
 
+  // eslint-disable-next-line mocha/no-setup-in-describe
   skipOnWindows('synchronously decrypts gpg-encrypted netrc file', async () => {
     await configureGpgMock()
     const f = 'tmp/netrc.gpg'
@@ -174,6 +175,7 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
     expect(fs.readFileSync(f, {encoding: 'utf8'})).to.contain('-----BEGIN PGP MESSAGE-----')
   })
 
+  // eslint-disable-next-line mocha/no-setup-in-describe
   skipOnWindows('asynchronously decrypts gpg-encrypted netrc file', async () => {
     await configureGpgMock()
     const f = 'tmp/netrc.gpg'
@@ -189,7 +191,7 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
     expect(fs.readFileSync(f, {encoding: 'utf8'})).to.contain('-----BEGIN PGP MESSAGE-----')
   })
 
-  it('saving', () => {
+  it('saving', function () {
     const f = 'tmp/netrc'
     fs.writeFileSync(
       f,
@@ -251,7 +253,7 @@ machine anothernew login myuser
 `)
   })
 
-  it('adding a machine should create a new entry', async () => {
+  it('adding a machine should create a new entry', async function () {
     const f = 'tmp/netrc'
 
     const beforeSave = `machine api.dickeyxxx.com # foo
@@ -275,7 +277,7 @@ machine foo.bar.com
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('edit host', async () => {
+  it('edit host', async function () {
     const f = 'tmp/netrc'
 
     const beforeSave = `machine a
@@ -297,7 +299,7 @@ machine foo.bar.com
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('edit existing machine', async () => {
+  it('edit existing machine', async function () {
     const f = 'tmp/netrc'
 
     const beforeSave = `machine api.dickeyxxx.com # foo
@@ -325,7 +327,7 @@ machine b
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('removing a machine', async () => {
+  it('removing a machine', async function () {
     const f = 'tmp/netrc'
 
     const beforeSave = `machine api.dickeyxxx.com # foo
@@ -351,7 +353,7 @@ machine foo.bar.com
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('setting machine to undefined', async () => {
+  it('setting machine to undefined', async function () {
     const f = 'tmp/netrc'
 
     const beforeSave = `machine api.dickeyxxx.com # foo
@@ -377,7 +379,7 @@ machine foo.bar.com
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('empty netrc', async () => {
+  it('empty netrc', async function () {
     const f = 'tmp/netrc'
 
     const beforeSave = ''
@@ -397,7 +399,7 @@ machine foo.dickeyxxx.com login foo2 password bar2
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('netrc with nothing useful', async () => {
+  it('netrc with nothing useful', async function () {
     const f = 'tmp/netrc'
 
     const beforeSave = 'foobar\n'
@@ -418,7 +420,7 @@ machine foo.dickeyxxx.com login foo2 password bar2
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('netrc with duplicate entries', async () => {
+  it('netrc with duplicate entries', async function () {
     const f = 'tmp/netrc'
 
     const beforeSave = `machine a
@@ -449,7 +451,7 @@ machine b
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('set existing', async () => {
+  it('set existing', async function () {
     const f = 'tmp/netrc'
 
     const beforeSave = 'machine a password p login u'
@@ -466,7 +468,7 @@ machine b
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('set new prop', async () => {
+  it('set new prop', async function () {
     const f = 'tmp/netrc'
 
     const beforeSave = 'machine foo password p login u'
@@ -489,7 +491,7 @@ machine b
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('only login', async () => {
+  it('only login', async function () {
     const f = 'tmp/netrc'
     const beforeSave = 'machine u login foo password pass'
     fs.writeFileSync(f, beforeSave)
@@ -505,7 +507,7 @@ machine foo login uu
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('only password', async () => {
+  it('only password', async function () {
     const f = 'tmp/netrc'
     const beforeSave = 'machine u login foo password pass'
     fs.writeFileSync(f, beforeSave)
@@ -521,7 +523,7 @@ machine foo password uu
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('file not found', async () => {
+  it('file not found', async function () {
     const f = 'tmp/netrc'
     fs.removeSync(f)
     const netrc = new Netrc(f)
@@ -532,7 +534,7 @@ machine foo password uu
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('file not found sync', () => {
+  it('file not found sync', function () {
     const f = 'tmp/netrc'
     fs.removeSync(f)
     const netrc = new Netrc(f)
@@ -543,15 +545,15 @@ machine foo password uu
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
-  it('extra code coverage checks', () => {
+  it('extra code coverage checks', function () {
     const netrc = new Netrc()
     netrc.loadSync()
-    expect(Symbol() in netrc.machines).to.equal(false)
+    expect(Symbol('test') in netrc.machines).to.equal(false)
     netrc.machines.a = {login: 'foo'}
-    expect(Symbol() in netrc.machines.a).to.equal(false)
+    expect(Symbol('test') in netrc.machines.a).to.equal(false)
     expect(netrc.machines.a.lwljlkwejf).to.equal(undefined)
-    expect(netrc.machines.a[Symbol() as any]).to.equal(undefined)
-    expect(netrc.machines[Symbol() as any]).to.equal(undefined)
+    expect(netrc.machines.a[Symbol('test') as any]).to.equal(undefined)
+    expect(netrc.machines[Symbol('test') as any]).to.equal(undefined)
     netrc.machines.b = undefined as any
   })
 })

@@ -9,13 +9,6 @@ process.env.NETRC_PARSER_DEBUG = '1'
 const skipOnWindows = process.platform === 'win32' ? it.skip : it
 
 const configureGpgMock = async () => {
-  // install gpg if not already installed
-  await execa('gpg', ['--version']).catch(async error => {
-    if (error instanceof ExecaError && error.code === 'ENOENT' && process.platform === 'darwin') {
-      console.log('installing gpg via homebrew')
-      await execa('brew', ['install', 'gpg'])
-    }
-  })
   // Create and set temp gpg home directory
   const mockGnupgHome = 'tmp/gpg'
   fs.mkdirpSync(mockGnupgHome)

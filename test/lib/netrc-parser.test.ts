@@ -555,6 +555,30 @@ machine foo password uu
     expect(fs.readFileSync(f, 'utf8')).to.equal(afterSave)
   })
 
+  it('loadSync() wraps and rethrows non-ENOENT errors with file context', function () {
+    const f = 'tmp'
+    const netrc = new Netrc(f)
+    try {
+      netrc.loadSync()
+      expect.fail('Expected an error to be thrown')
+    } catch (error: unknown) {
+      expect(error).to.be.instanceOf(Error)
+      expect((error as {detail?: string}).detail).to.include(`Error occurred during reading netrc file: ${f}`)
+    }
+  })
+
+  it('load() wraps and rethrows non-ENOENT errors with file context', async function () {
+    const f = 'tmp'
+    const netrc = new Netrc(f)
+    try {
+      await netrc.load()
+      expect.fail('Expected an error to be thrown')
+    } catch (error: unknown) {
+      expect(error).to.be.instanceOf(Error)
+      expect((error as {detail?: string}).detail).to.include(`Error occurred during reading netrc file: ${f}`)
+    }
+  })
+
   it('extra code coverage checks', function () {
     const netrc = new Netrc()
     netrc.loadSync()

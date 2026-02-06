@@ -7,5 +7,5 @@
   "recursive": true,
   "reporter": "spec",
   "timeout": 15000,
-  "node-option": ["loader=ts-node/esm"]
+  "node-option": ["import=./test/register.mjs"]
 }

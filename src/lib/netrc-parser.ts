@@ -350,8 +350,12 @@ export class Netrc {
           continue
         }
 
-        if (t.pre) output.push(t.pre + '\n')
+        if (t.pre) {
+          output.push(t.pre + '\n')
+        }
+
         output.push(`machine ${t.host}`)
+
         if (t.internalWhitespace.includes('\n')) {
           this.addCommentToOutput(t, output)
           this.addPropsToOutput(t, output)

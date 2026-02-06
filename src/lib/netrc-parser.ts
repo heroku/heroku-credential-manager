@@ -23,12 +23,21 @@ export type Machines = {
   }
 }
 
-const netrcDebug = debug('netrc-parser')
+export type MachinesWithTokens = {
+  _tokens?: Token[]
+} & Machines
 
-// this is somewhat complicated but it takes the array of parsed tokens from parse()
-// and it creates ES6 proxy objects to allow them to be easily modified by the consumer of this library
-function proxify(tokens: Token[]): Machines {
-  const proxifyProps = (t: MachineToken) => new Proxy(t.props as any as {[key: string]: string}, {
+const credDebug = debug('heroku-credential-manager')
+
+/**
+ * Creates ES6 proxy objects from parsed tokens to allow easy modification by consumers.
+ * This is somewhat complicated, but it takes the array of parsed tokens from parse()
+ * and wraps them in proxies that intercept get/set/delete operations.
+ * @param tokens - Array of parsed tokens from the netrc file
+ * @returns A proxied MachinesWithTokens object that allows direct property access and modification
+ */
+function proxify(tokens: Token[]): MachinesWithTokens {
+  const proxifyProps = (t: MachineToken) => new Proxy(t.props as unknown as {[key: string]: string}, {
     get(_, key: string) {
       if (key === 'host') return t.host
       if (typeof key !== 'string') return t.props[key]
@@ -56,8 +65,8 @@ function proxify(tokens: Token[]): Machines {
     return machineTokens.at(-1)!.internalWhitespace
   }
 
-  const obj: Machines = {}
-  obj._tokens = tokens as any
+  const obj: MachinesWithTokens = {}
+  obj._tokens = tokens
   for (const m of machines) obj[m.host] = m
   return new Proxy(obj, {
     deleteProperty(obj, host: string) {
@@ -99,7 +108,13 @@ function proxify(tokens: Token[]): Machines {
   })
 }
 
-export function parse(body: string): Machines {
+/**
+ * Parses a netrc file body into a structured MachinesWithTokens object.
+ * Handles both inline and multiline machine definitions, including comments.
+ * @param body - The raw string content of a netrc file
+ * @returns A proxied MachinesWithTokens object containing all parsed machine entries
+ */
+export function parse(body: string): MachinesWithTokens {
   const lines = body.split('\n')
   let pre: string[] = []
   const machines: MachineToken[] = []
@@ -152,15 +167,24 @@ export function parse(body: string): Machines {
 
 export class Netrc {
   file: string
-  machines!: Machines
+  machines!: MachinesWithTokens
 
+  /**
+   * Creates a new Netrc instance.
+   * @param file - Optional path to the netrc file. If not provided, uses the default location.
+   */
   constructor(file?: string) {
     this.file = file || this.defaultFile
   }
 
-  async load() {
+  /**
+   * Asynchronously loads and parses the netrc file.
+   * Handles both plain text and GPG-encrypted files.
+   * @returns A promise that resolves when loading is complete, or throws on error
+   */
+  async load(): Promise<never | void> {
     try {
-      netrcDebug('load', this.file)
+      credDebug('load', this.file)
       const decryptFile = async (): Promise<string> => {
         const {exitCode, stdout} = await execa('gpg', this.gpgDecryptArgs, {reject: false, stdio: ['inherit', 'pipe', 'inherit']})
         if (exitCode !== 0) throw new Error(`gpg exited with code ${exitCode}`)
@@ -175,15 +199,20 @@ export class Netrc {
         })
       }))
       this.machines = parse(body)
-      netrcDebug('machines: %o', Object.keys(this.machines))
+      credDebug('machines: %o', Object.keys(this.machines))
     } catch (error) {
       return this.throw(error)
     }
   }
 
-  loadSync() {
+  /**
+   * Synchronously loads and parses the netrc file.
+   * Handles both plain text and GPG-encrypted files.
+   * @returns void, or throws on error
+   */
+  loadSync(): never | void {
     try {
-      netrcDebug('loadSync', this.file)
+      credDebug('loadSync', this.file)
       const decryptFile = (): string => {
         const {exitCode, stdout} = execaSync('gpg', this.gpgDecryptArgs, {reject: false, stdio: ['inherit', 'pipe', 'inherit']})
         if (exitCode !== 0) throw new Error(`gpg exited with code ${exitCode}`)
@@ -202,14 +231,19 @@ export class Netrc {
       }
 
       this.machines = parse(body)
-      netrcDebug('machines: %o', Object.keys(this.machines))
+      credDebug('machines: %o', Object.keys(this.machines))
     } catch (error) {
       return this.throw(error)
     }
   }
 
+  /**
+   * Asynchronously saves the current machines to the netrc file.
+   * Handles GPG encryption if the file has a .gpg extension.
+   * @returns A promise that resolves when saving is complete
+   */
   async save() {
-    netrcDebug('save', this.file)
+    credDebug('save', this.file)
     let body = this.output
     if (this.file.endsWith('.gpg')) {
       const {exitCode, stdout} = await execa('gpg', this.gpgEncryptArgs, {input: body, reject: false, stdio: ['pipe', 'pipe', 'inherit']})
@@ -222,8 +256,13 @@ export class Netrc {
     })
   }
 
+  /**
+   * Synchronously saves the current machines to the netrc file.
+   * Handles GPG encryption if the file has a .gpg extension.
+   * @returns void, or throws on error
+   */
   saveSync() {
-    netrcDebug('saveSync', this.file)
+    credDebug('saveSync', this.file)
     let body = this.output
     if (this.file.endsWith('.gpg')) {
       const {exitCode, stdout} = execaSync('gpg', this.gpgEncryptArgs, {input: body, reject: false, stdio: ['pipe', 'pipe', 'inherit']})
@@ -234,10 +273,23 @@ export class Netrc {
     fs.writeFileSync(this.file, body, {mode: 0o600})
   }
 
+  /**
+   * Appends a machine token's comment to the output array.
+   * @param t - The machine token containing the comment
+   * @param output - The output string array to append to
+   * @returns void
+   */
   private addCommentToOutput(t: MachineToken, output: string[]) {
     if (t.comment) output.push(' ' + t.comment)
   }
 
+  /**
+   * Appends a machine token's properties to the output array.
+   * Login and password are added first, followed by other properties.
+   * @param t - The machine token containing the properties
+   * @param output - The output string array to append to
+   * @returns void
+   */
   private addPropsToOutput(t: MachineToken, output: string[]) {
     const addProp = (k: string) => output.push(`${t.internalWhitespace}${k} ${t.props[k].value}${t.props[k].comment || ''}`)
     // do login/password first
@@ -248,6 +300,11 @@ export class Netrc {
     }
   }
 
+  /**
+   * Gets the default netrc file path based on the operating system.
+   * Checks for GPG-encrypted version first.
+   * @returns The path to the default netrc file
+   */
   private get defaultFile(): string {
     const home = (os.platform() === 'win32'
         && (process.env.HOME
@@ -260,42 +317,61 @@ export class Netrc {
     return fs.existsSync(gpgFile) ? gpgFile : file
   }
 
+  /**
+   * Gets the GPG command arguments for decrypting the netrc file.
+   * @returns Array of GPG command-line arguments for decryption
+   */
   private get gpgDecryptArgs() {
     const args = ['--batch', '--quiet', '--decrypt', this.file]
-    netrcDebug('running gpg with args %o', args)
+    credDebug('running gpg with args %o', args)
     return args
   }
 
+  /**
+   * Gets the GPG command arguments for encrypting the netrc file.
+   * @returns Array of GPG command-line arguments for encryption
+   */
   private get gpgEncryptArgs() {
     const args = ['-a', '--batch', '--default-recipient-self', '-e']
-    netrcDebug('running gpg with args %o', args)
+    credDebug('running gpg with args %o', args)
     return args
   }
 
+  /**
+   * Generates the string representation of all machines for writing to file.
+   * @returns The formatted netrc file content as a string
+   */
   private get output(): string {
     const output: string[] = []
-    for (const t of this.machines._tokens as any as Token[]) {
-      if (t.type === 'other') {
-        output.push(t.content)
-        continue
-      }
+    if (this.machines._tokens) {
+      for (const t of this.machines._tokens as Token[]) {
+        if (t.type === 'other') {
+          output.push(t.content)
+          continue
+        }
 
-      if (t.pre) output.push(t.pre + '\n')
-      output.push(`machine ${t.host}`)
-      if (t.internalWhitespace.includes('\n')) {
-        this.addCommentToOutput(t, output)
-        this.addPropsToOutput(t, output)
-        output.push('\n')
-      } else {
-        this.addPropsToOutput(t, output)
-        this.addCommentToOutput(t, output)
-        output.push('\n')
+        if (t.pre) output.push(t.pre + '\n')
+        output.push(`machine ${t.host}`)
+        if (t.internalWhitespace.includes('\n')) {
+          this.addCommentToOutput(t, output)
+          this.addPropsToOutput(t, output)
+          output.push('\n')
+        } else {
+          this.addPropsToOutput(t, output)
+          this.addCommentToOutput(t, output)
+          output.push('\n')
+        }
       }
     }
 
     return output.join('')
   }
 
+  /**
+   * Wraps and throws an error with additional context about the netrc file.
+   * @param err - The original error
+   * @returns Never returns; always throws
+   */
   private throw(err: unknown): never {
     const error = (err instanceof Error ? err : new Error(String(err))) as {detail?: string} & Error
     if (error.detail) error.detail += '\n'

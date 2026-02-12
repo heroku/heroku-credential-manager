@@ -1,13 +1,10 @@
 import debug from 'debug'
 
 import {Netrc} from '../lib/netrc-parser.js'
-import {AuthEntry} from '../lib/types.js'
+import {NetrcAuthEntry} from '../lib/types.js'
 
 const credDebug = debug('heroku-credential-manager')
 
-/**
- * Handles credential storage and retrieval using the netrc file format.
- */
 export class NetrcHandler {
   public readonly netrc: Netrc
 
@@ -25,7 +22,7 @@ export class NetrcHandler {
    */
   public async getAuth(host: string) {
     await this.netrc.load()
-    const auth =  this.netrc.machines[host]
+    const auth = this.netrc.machines[host]
     if (!auth) {
       throw new Error(`No auth found for ${host}`)
     }
@@ -55,7 +52,7 @@ export class NetrcHandler {
    * @param host - The hostname to save credentials for.
    * @returns A promise that resolves when the credentials are saved.
    */
-  public async saveAuth(auth: AuthEntry, host: string) {
+  public async saveAuth(auth: NetrcAuthEntry, host: string) {
     await this.netrc.load()
     if (!this.netrc.machines[host]) this.netrc.machines[host] = {}
     this.netrc.machines[host] = {

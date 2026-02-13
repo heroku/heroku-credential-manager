@@ -1,3 +1,4 @@
+import {Scrubber} from '@heroku/js-blanket'
 import childProcess from 'node:child_process'
 
 import {KeychainAuthEntry} from '../lib/types.js'
@@ -38,6 +39,7 @@ export class MacOSHandler {
    * Removes the authentication token from macOS Keychain.
    * @param account - The account login to use (e.g. 'test@example.com')
    * @param service - The service name to use (default 'heroku-cli')
+   * @returns void
    * @throws Error if the removal operation fails.
    */
   public removeAuth(account: string, service = SERVICE_NAME): void {
@@ -55,6 +57,7 @@ export class MacOSHandler {
    * Saves an authentication entry to macOS Keychain.
    * If a credential with the same name already exists, it is updated with the new token.
    * @param auth - The authentication entry containing account and token information to store.
+   * @returns void
    * @throws Error if the save operation fails.
    */
   public saveAuth(auth: KeychainAuthEntry): void {
@@ -75,8 +78,13 @@ export class MacOSHandler {
    * @returns The scrubbed error message with sensitive data replaced by "[REDACTED]"
    */
   private scrubError(message: string): string {
-    return message
-      .replace(/-a\s+"[^"]*"/g, '-a "[REDACTED]"') // Scrub account (-a flag)
-      .replace(/-w\s+"[^"]*"/g, '-w "[REDACTED]"') // Scrub password/token (-w flag)
+    const scrubber = new Scrubber({
+      patterns: [
+        /-a\s+"[^"]*"/g, // Scrub account (-a flag)
+        /-w\s+"[^"]*"/g, // Scrub password/token (-w flag)
+      ],
+    })
+    const result = scrubber.scrub({message})
+    return result.data.message
   }
 }

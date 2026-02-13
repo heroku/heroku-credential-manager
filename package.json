@@ -41,6 +41,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@heroku/js-blanket": "^1.0.0",
     "debug": "^4.4.0",
     "execa": "^9.6.1"
   },

@@ -49,7 +49,7 @@ describe('MacOSHandler', function () {
       } catch (error) {
         expect(error).to.be.instanceOf(Error)
         expect((error as Error).message).to.include('Failed to retrieve token from macOS Keychain')
-        expect((error as Error).message).to.include('[REDACTED]')
+        expect((error as Error).message).to.include('[SCRUBBED]')
         expect((error as Error).message).to.not.include('test@example.com')
       }
     })
@@ -80,7 +80,7 @@ describe('MacOSHandler', function () {
       } catch (error) {
         expect(error).to.be.instanceOf(Error)
         expect((error as Error).message).to.include('Failed to remove token from macOS Keychain')
-        expect((error as Error).message).to.include('[REDACTED]')
+        expect((error as Error).message).to.include('[SCRUBBED]')
         expect((error as Error).message).to.not.include('user@example.com')
       }
     })
@@ -116,7 +116,7 @@ describe('MacOSHandler', function () {
       } catch (error) {
         expect(error).to.be.instanceOf(Error)
         expect((error as Error).message).to.include('Failed to store token in macOS Keychain')
-        expect((error as Error).message).to.include('[REDACTED]')
+        expect((error as Error).message).to.include('[SCRUBBED]')
         expect((error as Error).message).to.not.include('test@example.com')
         expect((error as Error).message).to.not.include('mytoken')
       }

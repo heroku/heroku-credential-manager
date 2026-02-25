@@ -34,7 +34,7 @@ export function getStorageConfig(): StorageConfig {
   const {HEROKU_NETRC_WRITE} = env
 
   // Forces the use of the .netrc file only
-  if (HEROKU_NETRC_WRITE === 'true') {
+  if (HEROKU_NETRC_WRITE?.toLowerCase() === 'true') {
     return {
       credentialStore: null,
       useNetrc: true,

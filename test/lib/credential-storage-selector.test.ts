@@ -19,7 +19,7 @@ describe('credential-storage-selector', function () {
 
     it('should return netrc-only when HEROKU_NETRC_WRITE is true', function () {
       platformStub.value('darwin')
-      process.env.HEROKU_NETRC_WRITE = 'true'
+      process.env.HEROKU_NETRC_WRITE = 'TRUE'
 
       const result = getStorageConfig()
 

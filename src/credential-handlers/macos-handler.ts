@@ -10,6 +10,13 @@ const SERVICE_NAME = 'heroku-cli'
  * Uses the macOS security command-line tool to interact with the Keychain.
  */
 export class MacOSHandler {
+  private readonly scrubber = new Scrubber({
+    patterns: [
+      /-a\s+"[^"]*"/g, // Scrub account (-a flag)
+      /-w\s+"[^"]*"/g, // Scrub password/token (-w flag)
+    ],
+  })
+
   /**
    * Retrieves the authentication token from macOS Keychain.
    * @param account - The account login to use (e.g. 'test@example.com')
@@ -75,16 +82,10 @@ export class MacOSHandler {
    * Scrubs account names and passwords/tokens from error messages.
    *
    * @param message - The error message to scrub
-   * @returns The scrubbed error message with sensitive data replaced by "[REDACTED]"
+   * @returns The scrubbed error message with sensitive data replaced by "[SCRUBBED]"
    */
   private scrubError(message: string): string {
-    const scrubber = new Scrubber({
-      patterns: [
-        /-a\s+"[^"]*"/g, // Scrub account (-a flag)
-        /-w\s+"[^"]*"/g, // Scrub password/token (-w flag)
-      ],
-    })
-    const result = scrubber.scrub({message})
+    const result = this.scrubber.scrub({message})
     return result.data.message
   }
 }

@@ -1,3 +1,4 @@
+import {Scrubber} from '@heroku/js-blanket'
 import childProcess from 'node:child_process'
 
 import {KeychainAuthEntry} from '../lib/types.js'
@@ -9,6 +10,13 @@ const SERVICE_NAME = 'heroku-cli'
  * Uses PowerShell commands to interact with the Windows.Security.Credentials.PasswordVault API.
  */
 export class WindowsHandler {
+  private readonly scrubber = new Scrubber({
+    patterns: [
+      /Retrieve\("([^"]+)",\s*"([^"]+)"\)/g, // Scrub account in Retrieve("service", "account")
+      /PasswordCredential\("([^"]+)",\s*"([^"]+)",\s*"([^"]+)"\)/g, // Scrub account and token in PasswordCredential
+    ],
+  })
+
   /**
    * Retrieves the authentication token from Windows Credential Manager.
    * @param account - The account login to use (e.g. 'test@example.com')
@@ -16,7 +24,7 @@ export class WindowsHandler {
    * @returns The stored authentication token.
    * @throws Error if the token is not found or retrieval fails.
    */
-  public async getAuth(account: string, service = SERVICE_NAME) {
+  public getAuth(account: string, service = SERVICE_NAME): string {
     try {
       const psCommand = `
       [void]
@@ -36,7 +44,7 @@ export class WindowsHandler {
       return token
     } catch (error) {
       const {message} = error as Error
-      throw new Error(`Failed to retrieve token from Windows Credential Manager: ${message}`)
+      throw new Error(`Failed to retrieve token from Windows Credential Manager: ${this.scrubError(message)}`)
     }
   }
 
@@ -44,10 +52,10 @@ export class WindowsHandler {
    * Removes the authentication token from Windows Credential Manager.
    * @param account - The account login to use (e.g. 'test@example.com')
    * @param service - The service name to use (default 'heroku-cli')
+   * @returns void
    * @throws Error if the removal operation fails.
-   * @returns A promise that resolves when the credentials are removed.
    */
-  public async removeAuth(account: string, service = SERVICE_NAME) {
+  public removeAuth(account: string, service = SERVICE_NAME): void {
     try {
       const psCommand = `
       [void][Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]
@@ -58,7 +66,7 @@ export class WindowsHandler {
       childProcess.execSync(psCommand, {shell: 'powershell'})
     } catch (error) {
       const {message} = error as Error
-      throw new Error(`Failed to remove token from Windows Credential Manager: ${message}`)
+      throw new Error(`Failed to remove token from Windows Credential Manager: ${this.scrubError(message)}`)
     }
   }
 
@@ -66,10 +74,10 @@ export class WindowsHandler {
    * Saves an authentication entry to Windows Credential Manager.
    * If a credential with the same name already exists, it is removed before saving the new one.
    * @param auth - The authentication entry containing account and token information to store.
-   * @returns A promise that resolves when the credentials are saved.
+   * @returns void
    * @throws Error if the save operation fails.
    */
-  public async saveAuth(auth: KeychainAuthEntry) {
+  public saveAuth(auth: KeychainAuthEntry): void {
     try {
       try {
         const removeCommand = `
@@ -92,7 +100,18 @@ export class WindowsHandler {
       childProcess.execSync(addCommand, {shell: 'powershell'})
     } catch (error) {
       const {message} = error as Error
-      throw new Error(`Failed to store token in Windows Credential Manager: ${message}`)
+      throw new Error(`Failed to store token in Windows Credential Manager: ${this.scrubError(message)}`)
     }
+  }
+
+  /**
+   * Scrubs account names and passwords/tokens from error messages.
+   *
+   * @param message - The error message to scrub
+   * @returns The scrubbed error message with sensitive data replaced by "[SCRUBBED]"
+   */
+  private scrubError(message: string): string {
+    const result = this.scrubber.scrub({message})
+    return result.data.message
   }
 }

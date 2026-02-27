@@ -39,6 +39,7 @@ export class NetrcHandler {
     await this.netrc.load()
     if (!this.netrc.machines[host]) {
       credDebug(`No credentials to logout for ${host}`)
+      console.error(`No credentials to logout for ${host}`)
       return
     }
 

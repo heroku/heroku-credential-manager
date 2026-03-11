@@ -118,7 +118,7 @@ describe('credential-manager', function () {
     it('should throw error when netrc password is empty', async function () {
       const macosStub = sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new Error('Not found'))
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'getAuth')
-      netrcStub.resolves({login: 'user@example.com', password: undefined as any})
+      netrcStub.resolves({login: 'user@example.com', password: undefined})
 
       await expect(credentialManager.getAuth('user@example.com', 'api.heroku.com'))
         .to.be.rejectedWith(Error, 'No credentials found. Please log in.')

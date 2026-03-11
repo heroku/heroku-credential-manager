@@ -116,7 +116,7 @@ export async function removeAuth(account: string, hosts: string[], service?: str
  * @param store - The type of credential store to use
  * @returns A handler instance for the specified store
  */
-function getCredentialHandler(store: CredentialStore) {
+export function getCredentialHandler(store: CredentialStore) {
   switch (store) {
   case CredentialStore.MacOSKeychain: {
     return new MacOSHandler()

@@ -1,4 +1,5 @@
-import {expect} from 'chai'
+import chai, {expect} from 'chai'
+import chaiAsPromised from 'chai-as-promised'
 import sinon from 'sinon'
 
 import {LinuxHandler} from '../src/credential-handlers/linux-handler.js'
@@ -7,6 +8,8 @@ import {NetrcHandler} from '../src/credential-handlers/netrc-handler.js'
 import {WindowsHandler} from '../src/credential-handlers/windows-handler.js'
 import * as credentialManager from '../src/index.js'
 import {CredentialStore} from '../src/lib/credential-storage-selector.js'
+
+chai.use(chaiAsPromised)
 
 describe('credential-manager', function () {
   beforeEach(function () {
@@ -62,6 +65,16 @@ describe('credential-manager', function () {
       expect(netrcStub.firstCall.args[1]).to.equal('api.heroku.com')
       expect(netrcStub.secondCall.args[1]).to.equal('git.heroku.com')
     })
+
+    it('should throw an error when netrc fails to save', async function () {
+      const macosStub = sinon.stub(MacOSHandler.prototype, 'saveAuth')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'saveAuth').throws(new Error('Netrc error'))
+
+      await expect(credentialManager.saveAuth('user@example.com', 'test-token', ['api.heroku.com']))
+        .to.be.rejectedWith(Error, 'Netrc error')
+      expect(macosStub.calledOnce).to.be.true
+      expect(netrcStub.calledOnce).to.be.true
+    })
   })
 
   describe('getAuth', function () {
@@ -69,11 +82,12 @@ describe('credential-manager', function () {
       const macosStub = sinon.stub(MacOSHandler.prototype, 'getAuth').returns('keychain-token')
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'getAuth')
 
-      const token = await credentialManager.getAuth('user@example.com', 'api.heroku.com')
+      const token = await credentialManager.getAuth('user@example.com', 'api.heroku.com', 'custom-service')
 
       expect(token).to.equal('keychain-token')
       expect(macosStub.calledOnce).to.be.true
       expect(macosStub.firstCall.args[0]).to.equal('user@example.com')
+      expect(macosStub.firstCall.args[1]).to.equal('custom-service')
       expect(netrcStub.notCalled).to.be.true
     })
 
@@ -95,14 +109,8 @@ describe('credential-manager', function () {
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'getAuth')
       netrcStub.rejects(new Error('No auth found for api.heroku.com'))
 
-      try {
-        await credentialManager.getAuth('user@example.com', 'api.heroku.com')
-        expect.fail('Should have thrown an error')
-      } catch (error) {
-        expect(error).to.be.instanceOf(Error)
-        expect((error as Error).message).to.equal('No auth found for api.heroku.com')
-      }
-
+      await expect(credentialManager.getAuth('user@example.com', 'api.heroku.com'))
+        .to.be.rejectedWith(Error, 'No auth found for api.heroku.com')
       expect(macosStub.calledOnce).to.be.true
       expect(netrcStub.calledOnce).to.be.true
     })
@@ -112,14 +120,8 @@ describe('credential-manager', function () {
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'getAuth')
       netrcStub.resolves({login: 'user@example.com', password: undefined as any})
 
-      try {
-        await credentialManager.getAuth('user@example.com', 'api.heroku.com')
-        expect.fail('Should have thrown an error')
-      } catch (error) {
-        expect(error).to.be.instanceOf(Error)
-        expect((error as Error).message).to.equal('No credentials found. Please log in.')
-      }
-
+      await expect(credentialManager.getAuth('user@example.com', 'api.heroku.com'))
+        .to.be.rejectedWith(Error, 'No credentials found. Please log in.')
       expect(macosStub.calledOnce).to.be.true
       expect(netrcStub.calledOnce).to.be.true
     })
@@ -130,10 +132,11 @@ describe('credential-manager', function () {
       const macosStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuth').resolves()
 
-      await credentialManager.removeAuth('user@example.com', ['api.heroku.com'])
+      await credentialManager.removeAuth('user@example.com', ['api.heroku.com'], 'custom-service')
 
       expect(macosStub.calledOnce).to.be.true
       expect(macosStub.firstCall.args[0]).to.equal('user@example.com')
+      expect(macosStub.firstCall.args[1]).to.equal('custom-service')
       expect(netrcStub.calledOnce).to.be.true
       expect(netrcStub.firstCall.args[0]).to.equal('api.heroku.com')
     })
@@ -158,6 +161,16 @@ describe('credential-manager', function () {
       expect(netrcStub.calledTwice).to.be.true
       expect(netrcStub.firstCall.args[0]).to.equal('api.heroku.com')
       expect(netrcStub.secondCall.args[0]).to.equal('git.heroku.com')
+    })
+
+    it('should throw an error when netrc fails to remove', async function () {
+      const macosStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuth').throws(new Error('Netrc error'))
+
+      await expect(credentialManager.removeAuth('user@example.com', ['api.heroku.com']))
+        .to.be.rejectedWith(Error, 'Netrc error')
+      expect(macosStub.calledOnce).to.be.true
+      expect(netrcStub.calledOnce).to.be.true
     })
   })
 

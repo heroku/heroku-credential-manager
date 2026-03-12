@@ -10,7 +10,9 @@ describe('credential-storage-selector', function () {
 
     beforeEach(function () {
       platformStub = sinon.stub(process, 'platform')
-      sinon.stub(process, 'env').value({})
+      const env = {...process.env}
+      sinon.stub(process, 'env').value(env)
+      delete env.HEROKU_NETRC_WRITE
     })
 
     afterEach(function () {

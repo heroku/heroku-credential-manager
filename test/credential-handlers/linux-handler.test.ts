@@ -22,25 +22,30 @@ describe('LinuxHandler', function () {
 
   describe('getAuth', function () {
     it('should call execSync with the correct arguments to retrieve the token', function () {
-      execSyncStub.returns(Buffer.from('my-secret-token'))
+      execSyncStub.returns('my-secret-token')
       const token = handler.getAuth('test@example.com')
       expect(execSyncStub.args[0][0]).to.contain('secret-tool lookup service "heroku-cli" account "test@example.com"')
       expect(token).to.equal('my-secret-token')
     })
 
     it('should use custom service name when provided', function () {
-      execSyncStub.returns(Buffer.from('my-secret-token'))
+      execSyncStub.returns('my-secret-token')
       const token = handler.getAuth('test@example.com', 'custom-service')
       expect(execSyncStub.args[0][0]).to.contain('secret-tool lookup service "custom-service" account "test@example.com"')
       expect(token).to.equal('my-secret-token')
     })
 
     it('should throw an error when token is empty', function () {
-      execSyncStub.returns(Buffer.from(''))
+      execSyncStub.returns('')
       expect(() => handler.getAuth('test@example.com')).to.throw('Failed to retrieve token from Linux keyring: Token not found')
     })
 
-    it('should throw an error when retrieval fails and scrub sensitive data from error message', function () {
+    it('should throw an error when retrieval fails', function () {
+      execSyncStub.throws(new Error('Permission denied'))
+      expect(() => handler.getAuth('test@example.com')).to.throw('Failed to retrieve token from Linux keyring: Permission denied')
+    })
+
+    it('should scrub sensitive data from error messages', function () {
       const err = new Error(
         'Command failed: secret-tool lookup service "heroku-cli" account "test@example.com"',
       )
@@ -58,20 +63,111 @@ describe('LinuxHandler', function () {
     })
   })
 
+  describe('listAccounts', function () {
+    it('should call execSync with the correct arguments to list accounts', function () {
+      execSyncStub.returns('')
+      handler.listAccounts()
+      expect(execSyncStub.args[0][0]).to.contain('secret-tool search --all service "heroku-cli"')
+    })
+
+    it('should use a custom service name when provided', function () {
+      execSyncStub.returns('')
+      handler.listAccounts('custom-service')
+      expect(execSyncStub.args[0][0]).to.contain('secret-tool search --all service "custom-service"')
+    })
+
+    it('should return an array of accounts when multiple credentials are found', function () {
+      const mockOutput = `
+[/org/freedesktop/secrets/collection/login/1]
+label = Heroku CLI
+secret = token1
+created = 2024-01-01 12:00:00
+modified = 2024-01-01 12:00:00
+schema = org.freedesktop.Secret.Generic
+attribute.service = heroku-cli
+attribute.account = user1@example.com
+
+[/org/freedesktop/secrets/collection/login/2]
+label = Heroku CLI
+secret = token2
+created = 2024-01-01 12:00:00
+modified = 2024-01-01 12:00:00
+schema = org.freedesktop.Secret.Generic
+attribute.service = heroku-cli
+attribute.account = user2@example.com
+`
+      execSyncStub.returns(mockOutput)
+      const accounts = handler.listAccounts()
+
+      expect(accounts).to.deep.equal(['user1@example.com', 'user2@example.com'])
+    })
+
+    it('should return a single account when only one credential is found', function () {
+      const mockOutput = `
+[/org/freedesktop/secrets/collection/login/1]
+label = Heroku CLI
+secret = my-token
+created = 2024-01-01 12:00:00
+modified = 2024-01-01 12:00:00
+schema = org.freedesktop.Secret.Generic
+attribute.service = heroku-cli
+attribute.account = test@example.com
+`
+      execSyncStub.returns(mockOutput)
+      const accounts = handler.listAccounts()
+
+      expect(accounts).to.deep.equal(['test@example.com'])
+    })
+
+    it('should return an empty array when no credentials are found', function () {
+      execSyncStub.returns('')
+      const accounts = handler.listAccounts()
+
+      expect(accounts).to.deep.equal([])
+    })
+
+    it('should throw an error when the search command fails', function () {
+      execSyncStub.throws(new Error('Permission denied'))
+      expect(() => handler.listAccounts()).to.throw('Failed to list accounts in Linux keyring: Permission denied')
+    })
+
+    it('should scrub sensitive data from error messages', function () {
+      const err = new Error(
+        'Command failed: secret-tool search --all service "heroku-cli" account "test@example.com"',
+      )
+      execSyncStub.throws(err)
+
+      try {
+        handler.listAccounts()
+        expect.fail('Should have thrown an error')
+      } catch (error) {
+        expect(error).to.be.instanceOf(Error)
+        expect((error as Error).message).to.include('Failed to list accounts in Linux keyring')
+        expect((error as Error).message).to.include('[SCRUBBED]')
+        expect((error as Error).message).to.not.include('test@example.com')
+      }
+    })
+  })
+
   describe('removeAuth', function () {
     it('should call execSync with the correct arguments to remove the token', function () {
-      execSyncStub.returns(Buffer.from(''))
+      execSyncStub.returns('')
       handler.removeAuth('test@example.com')
       expect(execSyncStub.args[0][0]).to.contain('secret-tool clear service "heroku-cli" account "test@example.com"')
     })
 
     it('should use custom service name when provided', function () {
-      execSyncStub.returns(Buffer.from(''))
+      execSyncStub.returns('')
       handler.removeAuth('test@example.com', 'custom-service')
       expect(execSyncStub.args[0][0]).to.contain('secret-tool clear service "custom-service" account "test@example.com"')
     })
 
-    it('should throw an error when removal fails and scrub sensitive data from error message', function () {
+    it('should throw an error when removal fails', function () {
+      execSyncStub.throws(new Error('Permission denied'))
+      expect(() => handler.removeAuth('test@example.com')).to.throw('Failed to remove token from Linux keyring: Permission denied')
+    })
+
+    it('should scrub sensitive data from error messages', function () {
       const err = new Error(
         'Command failed: secret-tool clear service "heroku-cli" account "user@example.com"',
       )
@@ -94,7 +190,7 @@ describe('LinuxHandler', function () {
       spawnSyncStub.returns({
         error: undefined,
         status: 0,
-        stderr: Buffer.from(''),
+        stderr: '',
       })
       const authMock = {
         account: 'test@example.com',
@@ -126,16 +222,9 @@ describe('LinuxHandler', function () {
       spawnSyncStub.returns({
         error: undefined,
         status: 1,
-        stderr: Buffer.from('error communicating with Secret Service'),
+        stderr: 'error communicating with Secret Service',
       })
-
-      try {
-        handler.saveAuth(authMock)
-        expect.fail('Should have thrown an error')
-      } catch (error) {
-        expect(error).to.be.instanceOf(Error)
-        expect((error as Error).message).to.include('Failed to store token in Linux keyring: error communicating with Secret Service')
-      }
+      expect(() => handler.saveAuth(authMock)).to.throw('Failed to store token in Linux keyring: error communicating with Secret Service')
     })
 
     it('should throw an error when spawnSync encounters a system error', function () {
@@ -148,16 +237,9 @@ describe('LinuxHandler', function () {
       spawnSyncStub.returns({
         error: new Error('ENOENT: secret-tool command not found'),
         status: null,
-        stderr: Buffer.from(''),
+        stderr: '',
       })
-
-      try {
-        handler.saveAuth(authMock)
-        expect.fail('Should have thrown an error')
-      } catch (error) {
-        expect(error).to.be.instanceOf(Error)
-        expect((error as Error).message).to.include('Failed to store token in Linux keyring: ENOENT: secret-tool command not found')
-      }
+      expect(() => handler.saveAuth(authMock)).to.throw('Failed to store token in Linux keyring: ENOENT: secret-tool command not found')
     })
 
     it('should use fallback error message when stderr is empty', function () {
@@ -170,7 +252,22 @@ describe('LinuxHandler', function () {
       spawnSyncStub.returns({
         error: undefined,
         status: 1,
-        stderr: Buffer.from(''),  // Empty stderr triggers fallback
+        stderr: '', // Empty stderr triggers fallback
+      })
+      expect(() => handler.saveAuth(authMock)).to.throw('Failed to store token in Linux keyring: Unknown error')
+    })
+
+    it('should scrub sensitive data from error messages', function () {
+      const authMock = {
+        account: 'test@example.com',
+        service: 'heroku-cli',
+        token: 'mytoken',
+      }
+
+      spawnSyncStub.returns({
+        error: undefined,
+        status: 1,
+        stderr: 'Command failed: secret-tool store service "heroku-cli" account "user@example.com"',
       })
 
       try {
@@ -178,7 +275,9 @@ describe('LinuxHandler', function () {
         expect.fail('Should have thrown an error')
       } catch (error) {
         expect(error).to.be.instanceOf(Error)
-        expect((error as Error).message).to.include('Failed to store token in Linux keyring: Unknown error')
+        expect((error as Error).message).to.include('Failed to store token in Linux keyring')
+        expect((error as Error).message).to.include('[SCRUBBED]')
+        expect((error as Error).message).to.not.include('user@example.com')
       }
     })
   })

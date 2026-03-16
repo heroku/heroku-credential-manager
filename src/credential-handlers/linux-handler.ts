@@ -27,8 +27,9 @@ export class LinuxHandler {
     try {
       const output = childProcess.execSync(
         `secret-tool lookup service "${service}" account "${account}"`,
+        {encoding: 'utf8'},
       )
-      const token = output.toString().trim()
+      const token = output.trim()
 
       if (!token) {
         throw new Error('Token not found')
@@ -38,6 +39,50 @@ export class LinuxHandler {
     } catch (error) {
       const {message} = error as Error
       throw new Error(`Failed to retrieve token from Linux keyring: ${this.scrubError(message)}`)
+    }
+  }
+
+  /**
+   * Lists all accounts stored in the Linux keyring for a given service.
+   * @param service - The service name to search for (default 'heroku-cli')
+   * @returns Array of account names found for the service
+   * @throws Error if the search operation fails
+   */
+  public listAccounts(service = SERVICE_NAME): string[] {
+    try {
+      const output = childProcess.execSync(
+        `secret-tool search --all service "${service}"`,
+        {encoding: 'utf8'},
+      )
+
+      // Parse output format (from libsecret source code):
+      // [/org/freedesktop/secrets/collection/login/###]
+      // label = Label Name
+      // secret = secret-value
+      // created = 2024-01-01 12:00:00
+      // modified = 2024-01-01 12:00:00
+      // schema = org.freedesktop.Secret.Generic
+      // attribute.service = heroku-cli
+      // attribute.account = user@example.com
+      // (blank line between entries)
+
+      const accounts: string[] = []
+      const lines = output.split('\n')
+
+      for (const line of lines) {
+        // Look for lines with "attribute.account = <value>"
+        if (line.startsWith('attribute.account = ')) {
+          const account = line.slice('attribute.account = '.length).trim()
+          if (account) {
+            accounts.push(account)
+          }
+        }
+      }
+
+      return accounts
+    } catch (error) {
+      const {message} = error as Error
+      throw new Error(`Failed to list accounts in Linux keyring: ${this.scrubError(message)}`)
     }
   }
 
@@ -52,6 +97,7 @@ export class LinuxHandler {
     try {
       childProcess.execSync(
         `secret-tool clear service "${service}" account "${account}"`,
+        {encoding: 'utf8'},
       )
     } catch (error) {
       const {message} = error as Error
@@ -89,7 +135,7 @@ export class LinuxHandler {
       }
 
       if (process.status !== 0) {
-        const stderr = process.stderr?.toString() || 'Unknown error'
+        const stderr = process.stderr || 'Unknown error'
         throw new Error(stderr)
       }
     } catch (error) {

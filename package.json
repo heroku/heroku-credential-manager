@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "description": "Heroku credential management for the CLI",
   "author": "Heroku",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/heroku/heroku-credential-manager.git"

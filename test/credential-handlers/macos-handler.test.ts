@@ -90,7 +90,7 @@ attributes:
 
       expect(accounts).to.deep.equal(['user1@example.com', 'user2@example.com'])
     })
-    
+
     it('should filter by service name when multiple services exist', function () {
       const mockOutput = `
 keychain: "/Users/test/Library/Keychains/login.keychain-db"

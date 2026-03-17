@@ -28,8 +28,9 @@ export class MacOSHandler {
     try {
       const output = childProcess.execSync(
         `security find-generic-password -a "${account}" -s "${service}" -w`,
+        {encoding: 'utf8'},
       )
-      const token = output.toString().trim()
+      const token = output.trim()
 
       if (!token) {
         throw new Error('Token not found')
@@ -39,6 +40,53 @@ export class MacOSHandler {
     } catch (error) {
       const {message} = error as Error
       throw new Error(`Failed to retrieve token from macOS Keychain: ${this.scrubError(message)}`)
+    }
+  }
+
+  /**
+   * Lists all accounts stored in macOS Keychain for a given service.
+   * @param service - The service name to search for (default 'heroku-cli')
+   * @returns Array of account names found for the service
+   * @throws Error if the search operation fails
+   */
+  public listAccounts(service = SERVICE_NAME): string[] {
+    try {
+      const output = childProcess.execSync('security dump-keychain', {encoding: 'utf8'})
+
+      // Expected output format:
+      // keychain: "/path/to/keychain"
+      // version: 512
+      // class: "genp"
+      // attributes:
+      //     0x00000007 <blob>="service-name"
+      //     "acct"<blob>="account-name"
+      //     "svce"<blob>="service-name"
+      //     ...
+
+      const accounts: string[] = []
+
+      // Split by keychain entry boundaries
+      const entries = output.split(/^keychain:/m)
+
+      for (const entry of entries) {
+        // Only process generic password entries
+        if (!entry.includes('class: "genp"')) continue
+
+        // Extract service name
+        const serviceMatch = entry.match(/"svce"<blob>="([^"]+)"/)
+        if (!serviceMatch || serviceMatch[1] !== service) continue
+
+        // Extract account name
+        const accountMatch = entry.match(/"acct"<blob>="([^"]+)"/)
+        if (accountMatch) {
+          accounts.push(accountMatch[1])
+        }
+      }
+
+      return accounts
+    } catch (error) {
+      const {message} = error as Error
+      throw new Error(`Failed to list accounts in macOS Keychain: ${this.scrubError(message)}`)
     }
   }
 
@@ -53,6 +101,7 @@ export class MacOSHandler {
     try {
       childProcess.execSync(
         `security delete-generic-password -a "${account}" -s "${service}"`,
+        {encoding: 'utf8'},
       )
     } catch (error) {
       const {message} = error as Error
@@ -71,6 +120,7 @@ export class MacOSHandler {
     try {
       childProcess.execSync(
         `security add-generic-password -U -a "${auth.account}" -s "${auth.service}" -w "${auth.token}"`,
+        {encoding: 'utf8'},
       )
     } catch (error) {
       const {message} = error as Error

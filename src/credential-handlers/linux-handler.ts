@@ -55,7 +55,7 @@ export class LinuxHandler {
         {encoding: 'utf8'},
       )
 
-      // Expected output format (from libsecret source code):
+      // Expected output format:
       // [/org/freedesktop/secrets/collection/login/###]
       // label = Label Name
       // secret = secret-value

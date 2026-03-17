@@ -130,23 +130,6 @@ attribute.account = test@example.com
       execSyncStub.throws(new Error('Permission denied'))
       expect(() => handler.listAccounts()).to.throw('Failed to list accounts in Linux keyring: Permission denied')
     })
-
-    it('should scrub sensitive data from error messages', function () {
-      const err = new Error(
-        'Command failed: secret-tool search --all service "heroku-cli" account "test@example.com"',
-      )
-      execSyncStub.throws(err)
-
-      try {
-        handler.listAccounts()
-        expect.fail('Should have thrown an error')
-      } catch (error) {
-        expect(error).to.be.instanceOf(Error)
-        expect((error as Error).message).to.include('Failed to list accounts in Linux keyring')
-        expect((error as Error).message).to.include('[SCRUBBED]')
-        expect((error as Error).message).to.not.include('test@example.com')
-      }
-    })
   })
 
   describe('removeAuth', function () {

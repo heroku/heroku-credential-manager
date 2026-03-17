@@ -55,7 +55,7 @@ export class LinuxHandler {
         {encoding: 'utf8'},
       )
 
-      // Parse output format (from libsecret source code):
+      // Expected output format (from libsecret source code):
       // [/org/freedesktop/secrets/collection/login/###]
       // label = Label Name
       // secret = secret-value
@@ -70,7 +70,6 @@ export class LinuxHandler {
       const lines = output.split('\n')
 
       for (const line of lines) {
-        // Look for lines with "attribute.account = <value>"
         if (line.startsWith('attribute.account = ')) {
           const account = line.slice('attribute.account = '.length).trim()
           if (account) {

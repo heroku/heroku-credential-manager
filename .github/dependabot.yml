@@ -19,7 +19,7 @@ updates:
       day: "sunday"
       timezone: "America/Los_Angeles"
   commit-message:
-      prefix: "fix"
+      prefix: "deps"
       prefix-development: "chore"
       include: "scope"
   groups:
@@ -29,7 +29,5 @@ updates:
           - "patch"
           - "minor"
   ignore:
-    - dependency-name: "@oclif/core"
-      update-types: ["version-update:semver-major"]
     - dependency-name: "typescript"
       update-types: ["version-update:semver-major"]

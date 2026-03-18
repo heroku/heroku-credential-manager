@@ -20,8 +20,6 @@ updates:
       timezone: "America/Los_Angeles"
   commit-message:
       prefix: "deps"
-      prefix-development: "chore"
-      include: "scope"
   groups:
       dev-patch-minor-dependencies:
         dependency-type: "development"

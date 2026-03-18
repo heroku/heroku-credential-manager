@@ -15,7 +15,7 @@
     "dist"
   ],
   "devDependencies": {
-    "@heroku-cli/test-utils": "0.1.1",
+    "@heroku-cli/test-utils": "0.1.2",
     "@types/chai": "^4.3.13",
     "@types/chai-as-promised": "^8.0.2",
     "@types/debug": "^4.1.1",
@@ -33,7 +33,7 @@
     "eslint-config-oclif-typescript": "^3.1.14",
     "eslint-plugin-import": "^2.31.0",
     "eslint-plugin-mocha": "^10.4.3",
-    "fs-extra": "^11.3.3",
+    "fs-extra": "^11.3.4",
     "mocha": "^11.7.5",
     "nock": "^13.5.0",
     "sinon": "^18.0.1",

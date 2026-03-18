@@ -3,8 +3,6 @@ import childProcess from 'node:child_process'
 
 import {KeychainAuthEntry} from '../lib/types.js'
 
-const SERVICE_NAME = 'heroku-cli'
-
 /**
  * Handles credential storage, removal, and retrieval using the Linux Secret Service API.
  * Uses the secret-tool command-line utility (part of libsecret) to interact with desktop keyrings.
@@ -19,16 +17,17 @@ export class LinuxHandler {
   /**
    * Retrieves the authentication token from the Linux keyring.
    * @param account - The account login to use (e.g. 'test@example.com')
-   * @param service - The service name to use (default 'heroku-cli')
+   * @param service - The service name to use
    * @returns The stored authentication token.
    * @throws Error if the token is not found or retrieval fails.
    */
-  public getAuth(account: string, service = SERVICE_NAME): string {
+  public getAuth(account: string, service: string): string {
     try {
       const output = childProcess.execSync(
         `secret-tool lookup service "${service}" account "${account}"`,
+        {encoding: 'utf8'},
       )
-      const token = output.toString().trim()
+      const token = output.trim()
 
       if (!token) {
         throw new Error('Token not found')
@@ -42,16 +41,60 @@ export class LinuxHandler {
   }
 
   /**
+   * Lists all accounts stored in the Linux keyring for a given service.
+   * @param service - The service name to search for
+   * @returns Array of account names found for the service
+   * @throws Error if the search operation fails
+   */
+  public listAccounts(service: string): string[] {
+    try {
+      const output = childProcess.execSync(
+        `secret-tool search --all service "${service}"`,
+        {encoding: 'utf8'},
+      )
+
+      // Expected output format:
+      // [/org/freedesktop/secrets/collection/login/###]
+      // label = Label Name
+      // secret = secret-value
+      // created = 2024-01-01 12:00:00
+      // modified = 2024-01-01 12:00:00
+      // schema = org.freedesktop.Secret.Generic
+      // attribute.service = heroku-cli
+      // attribute.account = user@example.com
+      // (blank line between entries)
+
+      const accounts: string[] = []
+      const lines = output.split('\n')
+
+      for (const line of lines) {
+        if (line.startsWith('attribute.account = ')) {
+          const account = line.slice('attribute.account = '.length).trim()
+          if (account) {
+            accounts.push(account)
+          }
+        }
+      }
+
+      return accounts
+    } catch (error) {
+      const {message} = error as Error
+      throw new Error(`Failed to list accounts in Linux keyring: ${this.scrubError(message)}`)
+    }
+  }
+
+  /**
    * Removes the authentication token from the Linux keyring.
    * @param account - The account login to use (e.g. 'test@example.com')
-   * @param service - The service name to use (default 'heroku-cli')
+   * @param service - The service name to use
    * @returns void
    * @throws Error if the removal operation fails.
    */
-  public removeAuth(account: string, service = SERVICE_NAME): void {
+  public removeAuth(account: string, service: string): void {
     try {
       childProcess.execSync(
         `secret-tool clear service "${service}" account "${account}"`,
+        {encoding: 'utf8'},
       )
     } catch (error) {
       const {message} = error as Error
@@ -89,7 +132,7 @@ export class LinuxHandler {
       }
 
       if (process.status !== 0) {
-        const stderr = process.stderr?.toString() || 'Unknown error'
+        const stderr = process.stderr || 'Unknown error'
         throw new Error(stderr)
       }
     } catch (error) {

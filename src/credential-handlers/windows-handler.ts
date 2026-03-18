@@ -3,8 +3,6 @@ import childProcess from 'node:child_process'
 
 import {KeychainAuthEntry} from '../lib/types.js'
 
-const SERVICE_NAME = 'heroku-cli'
-
 /**
  * Handles credential storage and retrieval using the Windows Credential Manager.
  * Uses PowerShell commands to interact with the Windows.Security.Credentials.PasswordVault API.
@@ -20,11 +18,11 @@ export class WindowsHandler {
   /**
    * Retrieves the authentication token from Windows Credential Manager.
    * @param account - The account login to use (e.g. 'test@example.com')
-   * @param service - The service name to use (default 'heroku-cli')
+   * @param service - The service name to use
    * @returns The stored authentication token.
    * @throws Error if the token is not found or retrieval fails.
    */
-  public getAuth(account: string, service = SERVICE_NAME): string {
+  public getAuth(account: string, service: string): string {
     try {
       const psCommand = `
       [void]
@@ -34,8 +32,8 @@ export class WindowsHandler {
       $credential.Password
     `
 
-      const output = childProcess.execSync(psCommand, {shell: 'powershell'})
-      const token = output.toString().trim()
+      const output = childProcess.execSync(psCommand, {encoding: 'utf8', shell: 'powershell'})
+      const token = output.trim()
 
       if (!token) {
         throw new Error('Token not found')
@@ -49,13 +47,53 @@ export class WindowsHandler {
   }
 
   /**
+   * Lists all accounts stored in Windows Credential Manager for a given service.
+   * @param service - The service name to search for
+   * @returns Array of account names found for the service
+   * @throws Error if the search operation fails
+   */
+  public listAccounts(service: string): string[] {
+    try {
+      const psCommand = `
+      [void]
+      [Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]
+      $vault = New-Object Windows.Security.Credentials.PasswordVault
+      try {
+        $creds = $vault.FindAllByResource("${service}")
+        $creds | ForEach-Object { $_.UserName }
+      } catch {
+        # No credentials found for this resource
+        exit 0
+      }
+    `
+
+      const output = childProcess.execSync(psCommand, {encoding: 'utf8', shell: 'powershell'})
+
+      // Expected output format:
+      // user1@example.com
+      // user2@example.com
+      // ...
+
+      const accounts = output
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0)
+
+      return accounts
+    } catch (error) {
+      const {message} = error as Error
+      throw new Error(`Failed to list accounts in Windows Credential Manager: ${this.scrubError(message)}`)
+    }
+  }
+
+  /**
    * Removes the authentication token from Windows Credential Manager.
    * @param account - The account login to use (e.g. 'test@example.com')
-   * @param service - The service name to use (default 'heroku-cli')
+   * @param service - The service name to use
    * @returns void
    * @throws Error if the removal operation fails.
    */
-  public removeAuth(account: string, service = SERVICE_NAME): void {
+  public removeAuth(account: string, service: string): void {
     try {
       const psCommand = `
       [void][Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]
@@ -63,7 +101,7 @@ export class WindowsHandler {
       $credential = $vault.Retrieve("${service}", "${account}")
       $vault.Remove($credential)
     `
-      childProcess.execSync(psCommand, {shell: 'powershell'})
+      childProcess.execSync(psCommand, {encoding: 'utf8', shell: 'powershell'})
     } catch (error) {
       const {message} = error as Error
       throw new Error(`Failed to remove token from Windows Credential Manager: ${this.scrubError(message)}`)
@@ -86,7 +124,7 @@ export class WindowsHandler {
         $credential = $vault.Retrieve("${auth.service}", "${auth.account}")
         $vault.Remove($credential)
       `
-        childProcess.execSync(removeCommand, {shell: 'powershell'})
+        childProcess.execSync(removeCommand, {encoding: 'utf8', shell: 'powershell'})
       } catch {
         // noop - item does not exist
       }
@@ -97,7 +135,7 @@ export class WindowsHandler {
       $credential = New-Object Windows.Security.Credentials.PasswordCredential("${auth.service}", "${auth.account}", "${auth.token}")
       $vault.Add($credential)
     `
-      childProcess.execSync(addCommand, {shell: 'powershell'})
+      childProcess.execSync(addCommand, {encoding: 'utf8', shell: 'powershell'})
     } catch (error) {
       const {message} = error as Error
       throw new Error(`Failed to store token in Windows Credential Manager: ${this.scrubError(message)}`)

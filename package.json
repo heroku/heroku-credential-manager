@@ -44,7 +44,8 @@
   "dependencies": {
     "@heroku/js-blanket": "^1.0.0",
     "debug": "^4.4.0",
-    "execa": "^9.6.1"
+    "execa": "^9.6.1",
+    "inquirer": "^13.3.2"
   },
   "engines": {
     "node": ">=20"

@@ -3,8 +3,6 @@ import childProcess from 'node:child_process'
 
 import {KeychainAuthEntry} from '../lib/types.js'
 
-const SERVICE_NAME = 'heroku-cli'
-
 /**
  * Handles credential storage, removal, and retrieval using the macOS Keychain.
  * Uses the macOS security command-line tool to interact with the Keychain.
@@ -20,11 +18,11 @@ export class MacOSHandler {
   /**
    * Retrieves the authentication token from macOS Keychain.
    * @param account - The account login to use (e.g. 'test@example.com')
-   * @param service - The service name to use (default 'heroku-cli')
+   * @param service - The service name to use
    * @returns The stored authentication token.
    * @throws Error if the token is not found or retrieval fails.
    */
-  public getAuth(account: string, service = SERVICE_NAME): string {
+  public getAuth(account: string, service: string): string {
     try {
       const output = childProcess.execSync(
         `security find-generic-password -a "${account}" -s "${service}" -w`,
@@ -45,11 +43,11 @@ export class MacOSHandler {
 
   /**
    * Lists all accounts stored in macOS Keychain for a given service.
-   * @param service - The service name to search for (default 'heroku-cli')
+   * @param service - The service name to search for
    * @returns Array of account names found for the service
    * @throws Error if the search operation fails
    */
-  public listAccounts(service = SERVICE_NAME): string[] {
+  public listAccounts(service: string): string[] {
     try {
       const output = childProcess.execSync('security dump-keychain', {encoding: 'utf8'})
 
@@ -93,11 +91,11 @@ export class MacOSHandler {
   /**
    * Removes the authentication token from macOS Keychain.
    * @param account - The account login to use (e.g. 'test@example.com')
-   * @param service - The service name to use (default 'heroku-cli')
+   * @param service - The service name to use
    * @returns void
    * @throws Error if the removal operation fails.
    */
-  public removeAuth(account: string, service = SERVICE_NAME): void {
+  public removeAuth(account: string, service: string): void {
     try {
       childProcess.execSync(
         `security delete-generic-password -a "${account}" -s "${service}"`,

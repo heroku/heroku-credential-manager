@@ -23,26 +23,19 @@ describe('LinuxHandler', function () {
   describe('getAuth', function () {
     it('should call execSync with the correct arguments to retrieve the token', function () {
       execSyncStub.returns('my-secret-token')
-      const token = handler.getAuth('test@example.com')
+      const token = handler.getAuth('test@example.com', 'heroku-cli')
       expect(execSyncStub.args[0][0]).to.contain('secret-tool lookup service "heroku-cli" account "test@example.com"')
-      expect(token).to.equal('my-secret-token')
-    })
-
-    it('should use custom service name when provided', function () {
-      execSyncStub.returns('my-secret-token')
-      const token = handler.getAuth('test@example.com', 'custom-service')
-      expect(execSyncStub.args[0][0]).to.contain('secret-tool lookup service "custom-service" account "test@example.com"')
       expect(token).to.equal('my-secret-token')
     })
 
     it('should throw an error when token is empty', function () {
       execSyncStub.returns('')
-      expect(() => handler.getAuth('test@example.com')).to.throw('Failed to retrieve token from Linux keyring: Token not found')
+      expect(() => handler.getAuth('test@example.com', 'heroku-cli')).to.throw('Failed to retrieve token from Linux keyring: Token not found')
     })
 
     it('should throw an error when retrieval fails', function () {
       execSyncStub.throws(new Error('Permission denied'))
-      expect(() => handler.getAuth('test@example.com')).to.throw('Failed to retrieve token from Linux keyring: Permission denied')
+      expect(() => handler.getAuth('test@example.com', 'heroku-cli')).to.throw('Failed to retrieve token from Linux keyring: Permission denied')
     })
 
     it('should scrub sensitive data from error messages', function () {
@@ -52,7 +45,7 @@ describe('LinuxHandler', function () {
       execSyncStub.throws(err)
 
       try {
-        handler.getAuth('test@example.com')
+        handler.getAuth('test@example.com', 'heroku-cli')
         expect.fail('Should have thrown an error')
       } catch (error) {
         expect(error).to.be.instanceOf(Error)
@@ -66,14 +59,8 @@ describe('LinuxHandler', function () {
   describe('listAccounts', function () {
     it('should call execSync with the correct arguments to list accounts', function () {
       execSyncStub.returns('')
-      handler.listAccounts()
+      handler.listAccounts('heroku-cli')
       expect(execSyncStub.args[0][0]).to.contain('secret-tool search --all service "heroku-cli"')
-    })
-
-    it('should use a custom service name when provided', function () {
-      execSyncStub.returns('')
-      handler.listAccounts('custom-service')
-      expect(execSyncStub.args[0][0]).to.contain('secret-tool search --all service "custom-service"')
     })
 
     it('should return an array of accounts when multiple credentials are found', function () {
@@ -97,7 +84,7 @@ attribute.service = heroku-cli
 attribute.account = user2@example.com
 `
       execSyncStub.returns(mockOutput)
-      const accounts = handler.listAccounts()
+      const accounts = handler.listAccounts('heroku-cli')
 
       expect(accounts).to.deep.equal(['user1@example.com', 'user2@example.com'])
     })
@@ -114,40 +101,34 @@ attribute.service = heroku-cli
 attribute.account = test@example.com
 `
       execSyncStub.returns(mockOutput)
-      const accounts = handler.listAccounts()
+      const accounts = handler.listAccounts('heroku-cli')
 
       expect(accounts).to.deep.equal(['test@example.com'])
     })
 
     it('should return an empty array when no credentials are found', function () {
       execSyncStub.returns('')
-      const accounts = handler.listAccounts()
+      const accounts = handler.listAccounts('heroku-cli')
 
       expect(accounts).to.deep.equal([])
     })
 
     it('should throw an error when the search command fails', function () {
       execSyncStub.throws(new Error('Permission denied'))
-      expect(() => handler.listAccounts()).to.throw('Failed to list accounts in Linux keyring: Permission denied')
+      expect(() => handler.listAccounts('heroku-cli')).to.throw('Failed to list accounts in Linux keyring: Permission denied')
     })
   })
 
   describe('removeAuth', function () {
     it('should call execSync with the correct arguments to remove the token', function () {
       execSyncStub.returns('')
-      handler.removeAuth('test@example.com')
+      handler.removeAuth('test@example.com', 'heroku-cli')
       expect(execSyncStub.args[0][0]).to.contain('secret-tool clear service "heroku-cli" account "test@example.com"')
-    })
-
-    it('should use custom service name when provided', function () {
-      execSyncStub.returns('')
-      handler.removeAuth('test@example.com', 'custom-service')
-      expect(execSyncStub.args[0][0]).to.contain('secret-tool clear service "custom-service" account "test@example.com"')
     })
 
     it('should throw an error when removal fails', function () {
       execSyncStub.throws(new Error('Permission denied'))
-      expect(() => handler.removeAuth('test@example.com')).to.throw('Failed to remove token from Linux keyring: Permission denied')
+      expect(() => handler.removeAuth('test@example.com', 'heroku-cli')).to.throw('Failed to remove token from Linux keyring: Permission denied')
     })
 
     it('should scrub sensitive data from error messages', function () {
@@ -157,7 +138,7 @@ attribute.account = test@example.com
       execSyncStub.throws(err)
 
       try {
-        handler.removeAuth('user@example.com')
+        handler.removeAuth('user@example.com', 'heroku-cli')
         expect.fail('Should have thrown an error')
       } catch (error) {
         expect(error).to.be.instanceOf(Error)

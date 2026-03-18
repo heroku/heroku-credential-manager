@@ -10,6 +10,8 @@ import {NetrcAuthEntry} from './lib/types.js'
 
 const credDebug = debug('heroku-credential-manager')
 
+const SERVICE_NAME = 'heroku-cli'
+
 /**
  * Saves authentication credentials to the native credential store (if available) and .netrc file.
  *
@@ -19,7 +21,7 @@ const credDebug = debug('heroku-credential-manager')
  * @param service - Service name (defaults to 'heroku-cli')
  * @returns Promise that resolves when credentials are saved
  */
-export async function saveAuth(account: string, token: string, hosts: string[], service = 'heroku-cli'): Promise<void> {
+export async function saveAuth(account: string, token: string, hosts: string[], service = SERVICE_NAME): Promise<void> {
   const config = getStorageConfig()
   const netrcHandler = new NetrcHandler()
 
@@ -48,13 +50,13 @@ export async function saveAuth(account: string, token: string, hosts: string[], 
 /**
  * Retrieves authentication credentials from the native credential store (if available) or .netrc file.
  *
- * @param account - User's account (email)
+ * @param account - User's account (email), or undefined to search for account
  * @param host - Hostname for netrc lookup (e.g., 'api.heroku.com')
  * @param service - Service name (defaults to 'heroku-cli')
  * @returns Promise that resolves with the authentication token.
  * @throws Error if no credentials are found in either location.
  */
-export async function getAuth(account: string | undefined, host: string, service?: string): Promise<string> {
+export async function getAuth(account: string | undefined, host: string, service = SERVICE_NAME): Promise<string> {
   const config = getStorageConfig()
   const netrcHandler = new NetrcHandler()
 
@@ -94,12 +96,12 @@ export async function getAuth(account: string | undefined, host: string, service
 /**
  * Removes authentication credentials from the native credential store (if available) and .netrc file.
  *
- * @param account - User's account (email) - optional. If not provided, will search by service name only.
+ * @param account - User's account (email), or undefined to search for account
  * @param hosts - Hostname(s) for netrc storage (e.g., ['api.heroku.com'])
  * @param service - Service name (defaults to 'heroku-cli')
  * @returns Promise that resolves when credentials are removed
  */
-export async function removeAuth(account: string | undefined, hosts: string[], service?: string): Promise<void> {
+export async function removeAuth(account: string | undefined, hosts: string[], service = SERVICE_NAME): Promise<void> {
   const config = getStorageConfig()
   const netrcHandler = new NetrcHandler()
 
@@ -133,6 +135,7 @@ export async function removeAuth(account: string | undefined, hosts: string[], s
 
 /**
  * Factory function to create the appropriate credential handler based on platform.
+ * @private
  * @param store - The type of credential store to use
  * @returns A handler instance for the specified store
  */

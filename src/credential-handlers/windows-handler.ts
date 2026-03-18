@@ -3,8 +3,6 @@ import childProcess from 'node:child_process'
 
 import {KeychainAuthEntry} from '../lib/types.js'
 
-const SERVICE_NAME = 'heroku-cli'
-
 /**
  * Handles credential storage and retrieval using the Windows Credential Manager.
  * Uses PowerShell commands to interact with the Windows.Security.Credentials.PasswordVault API.
@@ -20,11 +18,11 @@ export class WindowsHandler {
   /**
    * Retrieves the authentication token from Windows Credential Manager.
    * @param account - The account login to use (e.g. 'test@example.com')
-   * @param service - The service name to use (default 'heroku-cli')
+   * @param service - The service name to use
    * @returns The stored authentication token.
    * @throws Error if the token is not found or retrieval fails.
    */
-  public getAuth(account: string, service = SERVICE_NAME): string {
+  public getAuth(account: string, service: string): string {
     try {
       const psCommand = `
       [void]
@@ -50,11 +48,11 @@ export class WindowsHandler {
 
   /**
    * Lists all accounts stored in Windows Credential Manager for a given service.
-   * @param service - The service name to search for (default 'heroku-cli')
+   * @param service - The service name to search for
    * @returns Array of account names found for the service
    * @throws Error if the search operation fails
    */
-  public listAccounts(service = SERVICE_NAME): string[] {
+  public listAccounts(service: string): string[] {
     try {
       const psCommand = `
       [void]
@@ -91,11 +89,11 @@ export class WindowsHandler {
   /**
    * Removes the authentication token from Windows Credential Manager.
    * @param account - The account login to use (e.g. 'test@example.com')
-   * @param service - The service name to use (default 'heroku-cli')
+   * @param service - The service name to use
    * @returns void
    * @throws Error if the removal operation fails.
    */
-  public removeAuth(account: string, service = SERVICE_NAME): void {
+  public removeAuth(account: string, service: string): void {
     try {
       const psCommand = `
       [void][Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]

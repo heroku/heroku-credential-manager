@@ -20,26 +20,19 @@ describe('MacOSHandler', function () {
   describe('getAuth', function () {
     it('should call execSync with the correct arguments to retrieve the token', function () {
       execSyncStub.returns('my-secret-token')
-      const token = handler.getAuth('test@example.com')
+      const token = handler.getAuth('test@example.com', 'heroku-cli')
       expect(execSyncStub.args[0][0]).to.contain('find-generic-password -a "test@example.com" -s "heroku-cli"')
-      expect(token).to.equal('my-secret-token')
-    })
-
-    it('should use custom service name when provided', function () {
-      execSyncStub.returns('my-secret-token')
-      const token = handler.getAuth('test@example.com', 'custom-service')
-      expect(execSyncStub.args[0][0]).to.contain('find-generic-password -a "test@example.com" -s "custom-service"')
       expect(token).to.equal('my-secret-token')
     })
 
     it('should throw an error when token is empty', function () {
       execSyncStub.returns('')
-      expect(() => handler.getAuth('test@example.com')).to.throw('Failed to retrieve token from macOS Keychain: Token not found')
+      expect(() => handler.getAuth('test@example.com', 'heroku-cli')).to.throw('Failed to retrieve token from macOS Keychain: Token not found')
     })
 
     it('should throw an error when retrieval fails', function () {
       execSyncStub.throws(new Error('Permission denied'))
-      expect(() => handler.getAuth('test@example.com')).to.throw('Failed to retrieve token from macOS Keychain: Permission denied')
+      expect(() => handler.getAuth('test@example.com', 'heroku-cli')).to.throw('Failed to retrieve token from macOS Keychain: Permission denied')
     })
 
     it('should scrub sensitive data from error messages', function () {
@@ -49,7 +42,7 @@ describe('MacOSHandler', function () {
       execSyncStub.throws(err)
 
       try {
-        handler.getAuth('test@example.com')
+        handler.getAuth('test@example.com', 'heroku-cli')
         expect.fail('Should have thrown an error')
       } catch (error) {
         expect(error).to.be.instanceOf(Error)
@@ -63,7 +56,7 @@ describe('MacOSHandler', function () {
   describe('listAccounts', function () {
     it('should call execSync with the correct arguments to list accounts', function () {
       execSyncStub.returns('')
-      handler.listAccounts()
+      handler.listAccounts('heroku-cli')
 
       expect(execSyncStub.args[0][0]).to.equal('security dump-keychain')
     })
@@ -86,7 +79,7 @@ attributes:
     "svce"<blob>="heroku-cli"
 `
       execSyncStub.returns(mockOutput)
-      const accounts = handler.listAccounts()
+      const accounts = handler.listAccounts('heroku-cli')
 
       expect(accounts).to.deep.equal(['user1@example.com', 'user2@example.com'])
     })
@@ -107,7 +100,7 @@ attributes:
     "svce"<blob>="other-service"
 `
       execSyncStub.returns(mockOutput)
-      const accounts = handler.listAccounts()
+      const accounts = handler.listAccounts('heroku-cli')
 
       expect(accounts).to.deep.equal(['test@example.com'])
     })
@@ -128,7 +121,7 @@ attributes:
     "svce"<blob>="heroku-cli"
 `
       execSyncStub.returns(mockOutput)
-      const accounts = handler.listAccounts()
+      const accounts = handler.listAccounts('heroku-cli')
 
       expect(accounts).to.deep.equal(['test2@example.com'])
     })
@@ -144,54 +137,34 @@ attributes:
     "svce"<blob>="heroku-cli"
 `
       execSyncStub.returns(mockOutput)
-      const accounts = handler.listAccounts()
+      const accounts = handler.listAccounts('heroku-cli')
 
-      expect(accounts).to.deep.equal(['test@example.com'])
-    })
-
-    it('should use a custom service name when provided', function () {
-      const mockOutput = `
-keychain: "/Users/test/Library/Keychains/login.keychain-db"
-version: 512
-class: "genp"
-attributes:
-    "acct"<blob>="test@example.com"
-    "svce"<blob>="custom-service"
-`
-      execSyncStub.returns(mockOutput)
-      const accounts = handler.listAccounts('custom-service')
       expect(accounts).to.deep.equal(['test@example.com'])
     })
 
     it('should return an empty array when no credentials are found', function () {
       execSyncStub.returns('')
-      const accounts = handler.listAccounts()
+      const accounts = handler.listAccounts('heroku-cli')
 
       expect(accounts).to.deep.equal([])
     })
 
     it('should throw an error when the search command fails', function () {
       execSyncStub.throws(new Error('Permission denied'))
-      expect(() => handler.listAccounts()).to.throw('Failed to list accounts in macOS Keychain: Permission denied')
+      expect(() => handler.listAccounts('heroku-cli')).to.throw('Failed to list accounts in macOS Keychain: Permission denied')
     })
   })
 
   describe('removeAuth', function () {
     it('should call execSync with the correct arguments to remove the token', function () {
       execSyncStub.returns('')
-      handler.removeAuth('test@example.com')
+      handler.removeAuth('test@example.com', 'heroku-cli')
       expect(execSyncStub.args[0][0]).to.contain('delete-generic-password -a "test@example.com" -s "heroku-cli"')
-    })
-
-    it('should use custom service name when provided', function () {
-      execSyncStub.returns('')
-      handler.removeAuth('test@example.com', 'custom-service')
-      expect(execSyncStub.args[0][0]).to.contain('delete-generic-password -a "test@example.com" -s "custom-service"')
     })
 
     it('should throw an error when removal fails', function () {
       execSyncStub.throws(new Error('Permission denied'))
-      expect(() => handler.removeAuth('test@example.com')).to.throw('Failed to remove token from macOS Keychain: Permission denied')
+      expect(() => handler.removeAuth('test@example.com', 'heroku-cli')).to.throw('Failed to remove token from macOS Keychain: Permission denied')
     })
 
     it('should scrub sensitive data from error messages', function () {
@@ -201,7 +174,7 @@ attributes:
       execSyncStub.throws(err)
 
       try {
-        handler.removeAuth('user@example.com')
+        handler.removeAuth('user@example.com', 'heroku-cli')
         expect.fail('Should have thrown an error')
       } catch (error) {
         expect(error).to.be.instanceOf(Error)

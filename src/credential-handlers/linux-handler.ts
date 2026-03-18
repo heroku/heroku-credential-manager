@@ -3,8 +3,6 @@ import childProcess from 'node:child_process'
 
 import {KeychainAuthEntry} from '../lib/types.js'
 
-const SERVICE_NAME = 'heroku-cli'
-
 /**
  * Handles credential storage, removal, and retrieval using the Linux Secret Service API.
  * Uses the secret-tool command-line utility (part of libsecret) to interact with desktop keyrings.
@@ -19,11 +17,11 @@ export class LinuxHandler {
   /**
    * Retrieves the authentication token from the Linux keyring.
    * @param account - The account login to use (e.g. 'test@example.com')
-   * @param service - The service name to use (default 'heroku-cli')
+   * @param service - The service name to use
    * @returns The stored authentication token.
    * @throws Error if the token is not found or retrieval fails.
    */
-  public getAuth(account: string, service = SERVICE_NAME): string {
+  public getAuth(account: string, service: string): string {
     try {
       const output = childProcess.execSync(
         `secret-tool lookup service "${service}" account "${account}"`,
@@ -44,11 +42,11 @@ export class LinuxHandler {
 
   /**
    * Lists all accounts stored in the Linux keyring for a given service.
-   * @param service - The service name to search for (default 'heroku-cli')
+   * @param service - The service name to search for
    * @returns Array of account names found for the service
    * @throws Error if the search operation fails
    */
-  public listAccounts(service = SERVICE_NAME): string[] {
+  public listAccounts(service: string): string[] {
     try {
       const output = childProcess.execSync(
         `secret-tool search --all service "${service}"`,
@@ -88,11 +86,11 @@ export class LinuxHandler {
   /**
    * Removes the authentication token from the Linux keyring.
    * @param account - The account login to use (e.g. 'test@example.com')
-   * @param service - The service name to use (default 'heroku-cli')
+   * @param service - The service name to use
    * @returns void
    * @throws Error if the removal operation fails.
    */
-  public removeAuth(account: string, service = SERVICE_NAME): void {
+  public removeAuth(account: string, service: string): void {
     try {
       childProcess.execSync(
         `secret-tool clear service "${service}" account "${account}"`,

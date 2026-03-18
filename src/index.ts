@@ -74,6 +74,8 @@ export async function getAuth(account: string | undefined, host: string, service
       if (selectedAccount) {
         return handler.getAuth(selectedAccount, service)
       }
+
+      config.useNetrc = true
     } catch (error) {
       const {message} = error as Error
       credDebug(message)
@@ -117,6 +119,8 @@ export async function removeAuth(account: string | undefined, hosts: string[], s
 
         if (selectedAccount) {
           handler.removeAuth(selectedAccount, service)
+        } else {
+          config.useNetrc = true
         }
       }
     } catch (error) {

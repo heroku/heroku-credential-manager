@@ -1,5 +1,6 @@
 import chai, {expect} from 'chai'
 import chaiAsPromised from 'chai-as-promised'
+import inquirer from 'inquirer'
 import sinon from 'sinon'
 
 import {LinuxHandler} from '../src/credential-handlers/linux-handler.js'
@@ -181,8 +182,37 @@ describe('credential-manager', function () {
       expect(token).to.equal('keychain-token')
     })
 
+    it('should use the selected account when an account is not provided and multiple accounts are found', async function () {
+      const listAccountsStub = sinon.stub(MacOSHandler.prototype, 'listAccounts').returns(['user1@example.com', 'user2@example.com'])
+      const promptStub = (sinon.stub(inquirer, 'prompt')).resolves({account: 'user2@example.com'})
+      const macosStub = sinon.stub(MacOSHandler.prototype, 'getAuth').returns('keychain-token')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'getAuth')
+
+      const token = await credentialManager.getAuth(undefined, 'api.heroku.com')
+
+      expect(listAccountsStub.calledOnce).to.be.true
+      expect(promptStub.calledOnce).to.be.true
+      expect(macosStub.calledOnce).to.be.true
+      expect(macosStub.firstCall.args[0]).to.equal('user2@example.com')
+      expect(netrcStub.notCalled).to.be.true
+      expect(token).to.equal('keychain-token')
+    })
+
     it('should fall back to netrc when an account is not provided and no accounts are found', async function () {
       sinon.stub(MacOSHandler.prototype, 'listAccounts').returns([])
+      const macosStub = sinon.stub(MacOSHandler.prototype, 'getAuth')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'getAuth')
+      netrcStub.resolves({login: 'user@example.com', password: 'netrc-token'})
+
+      const token = await credentialManager.getAuth(undefined, 'api.heroku.com')
+
+      expect(macosStub.notCalled).to.be.true
+      expect(netrcStub.calledOnce).to.be.true
+      expect(token).to.equal('netrc-token')
+    })
+
+    it('should fall back to netrc when an account is not provided and listAccounts fails', async function () {
+      sinon.stub(MacOSHandler.prototype, 'listAccounts').throws(new Error('Keychain error'))
       const macosStub = sinon.stub(MacOSHandler.prototype, 'getAuth')
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'getAuth')
       netrcStub.resolves({login: 'user@example.com', password: 'netrc-token'})
@@ -276,8 +306,34 @@ describe('credential-manager', function () {
       expect(netrcStub.calledOnce).to.be.true
     })
 
+    it('should use the selected account when an account is not provided and multiple accounts are found', async function () {
+      const listAccountsStub = sinon.stub(MacOSHandler.prototype, 'listAccounts').returns(['user1@example.com', 'user2@example.com'])
+      const promptStub = (sinon.stub(inquirer, 'prompt')).resolves({account: 'user2@example.com'})
+      const macosStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuth').resolves()
+
+      await credentialManager.removeAuth(undefined, ['api.heroku.com'])
+
+      expect(listAccountsStub.calledOnce).to.be.true
+      expect(promptStub.calledOnce).to.be.true
+      expect(macosStub.calledOnce).to.be.true
+      expect(macosStub.firstCall.args[0]).to.equal('user2@example.com')
+      expect(netrcStub.calledOnce).to.be.true
+    })
+
     it('should continue to netrc when an account is not provided and no accounts are found', async function () {
       sinon.stub(MacOSHandler.prototype, 'listAccounts').returns([])
+      const macosStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuth').resolves()
+
+      await credentialManager.removeAuth(undefined, ['api.heroku.com'])
+
+      expect(macosStub.notCalled).to.be.true
+      expect(netrcStub.calledOnce).to.be.true
+    })
+
+    it('should continue to netrc when an account is not provided and listAccounts fails', async function () {
+      sinon.stub(MacOSHandler.prototype, 'listAccounts').throws(new Error('Keychain error'))
       const macosStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuth').resolves()
 

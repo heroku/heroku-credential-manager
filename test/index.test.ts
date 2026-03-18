@@ -125,6 +125,31 @@ describe('credential-manager', function () {
       expect(macosStub.calledOnce).to.be.true
       expect(netrcStub.calledOnce).to.be.true
     })
+
+    it('should use selected account when an account is not provided', async function () {
+      const listAccountsStub = sinon.stub(MacOSHandler.prototype, 'listAccounts').returns(['user@example.com'])
+      const getAuthStub = sinon.stub(MacOSHandler.prototype, 'getAuth').returns('keychain-token')
+
+      const token = await credentialManager.getAuth(undefined, 'api.heroku.com')
+
+      expect(listAccountsStub.calledOnce).to.be.true
+      expect(getAuthStub.calledOnce).to.be.true
+      expect(getAuthStub.firstCall.args[0]).to.equal('user@example.com')
+      expect(token).to.equal('keychain-token')
+    })
+
+    it('should fall back to netrc when an account is not provided and no accounts are found', async function () {
+      sinon.stub(MacOSHandler.prototype, 'listAccounts').returns([])
+      const getAuthStub = sinon.stub(MacOSHandler.prototype, 'getAuth')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'getAuth')
+      netrcStub.resolves({login: 'user@example.com', password: 'netrc-token'})
+
+      const token = await credentialManager.getAuth(undefined, 'api.heroku.com')
+
+      expect(getAuthStub.notCalled).to.be.true
+      expect(netrcStub.calledOnce).to.be.true
+      expect(token).to.equal('netrc-token')
+    })
   })
 
   describe('removeAuth', function () {
@@ -170,6 +195,28 @@ describe('credential-manager', function () {
       await expect(credentialManager.removeAuth('user@example.com', ['api.heroku.com']))
         .to.be.rejectedWith(Error, 'Netrc error')
       expect(macosStub.calledOnce).to.be.true
+      expect(netrcStub.calledOnce).to.be.true
+    })
+
+    it('should use selected account when an account is not provided', async function () {
+      const listAccountsStub = sinon.stub(MacOSHandler.prototype, 'listAccounts').returns(['user@example.com'])
+      const removeAuthStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
+
+      await credentialManager.removeAuth(undefined, ['api.heroku.com'])
+
+      expect(listAccountsStub.calledOnce).to.be.true
+      expect(removeAuthStub.calledOnce).to.be.true
+      expect(removeAuthStub.firstCall.args[0]).to.equal('user@example.com')
+    })
+
+    it('should continue to netrc when an account is not provided and no accounts are found', async function () {
+      sinon.stub(MacOSHandler.prototype, 'listAccounts').returns([])
+      const removeAuthStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuth').resolves()
+
+      await credentialManager.removeAuth(undefined, ['api.heroku.com'])
+
+      expect(removeAuthStub.notCalled).to.be.true
       expect(netrcStub.calledOnce).to.be.true
     })
   })

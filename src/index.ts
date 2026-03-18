@@ -4,6 +4,7 @@ import {LinuxHandler} from './credential-handlers/linux-handler.js'
 import {MacOSHandler} from './credential-handlers/macos-handler.js'
 import {NetrcHandler} from './credential-handlers/netrc-handler.js'
 import {WindowsHandler} from './credential-handlers/windows-handler.js'
+import {selectAccount} from './lib/account-selector.js'
 import {CredentialStore, getStorageConfig} from './lib/credential-storage-selector.js'
 import {NetrcAuthEntry} from './lib/types.js'
 
@@ -53,14 +54,24 @@ export async function saveAuth(account: string, token: string, hosts: string[], 
  * @returns Promise that resolves with the authentication token.
  * @throws Error if no credentials are found in either location.
  */
-export async function getAuth(account: string, host: string, service?: string): Promise<string> {
+export async function getAuth(account: string | undefined, host: string, service?: string): Promise<string> {
   const config = getStorageConfig()
   const netrcHandler = new NetrcHandler()
 
   if (config.credentialStore) {
     try {
       const handler = getCredentialHandler(config.credentialStore)
-      return handler.getAuth(account, service)
+
+      if (account) {
+        return handler.getAuth(account, service)
+      }
+
+      const accounts = handler.listAccounts(service)
+      const selectedAccount = await selectAccount(accounts)
+
+      if (selectedAccount) {
+        return handler.getAuth(selectedAccount, service)
+      }
     } catch (error) {
       const {message} = error as Error
       credDebug(message)
@@ -83,19 +94,29 @@ export async function getAuth(account: string, host: string, service?: string): 
 /**
  * Removes authentication credentials from the native credential store (if available) and .netrc file.
  *
- * @param account - User's account (email)
+ * @param account - User's account (email) - optional. If not provided, will search by service name only.
  * @param hosts - Hostname(s) for netrc storage (e.g., ['api.heroku.com'])
  * @param service - Service name (defaults to 'heroku-cli')
  * @returns Promise that resolves when credentials are removed
  */
-export async function removeAuth(account: string, hosts: string[], service?: string): Promise<void> {
+export async function removeAuth(account: string | undefined, hosts: string[], service?: string): Promise<void> {
   const config = getStorageConfig()
   const netrcHandler = new NetrcHandler()
 
   if (config.credentialStore) {
     try {
       const handler = getCredentialHandler(config.credentialStore)
-      handler.removeAuth(account, service)
+
+      if (account) {
+        handler.removeAuth(account, service)
+      } else {
+        const accounts = handler.listAccounts(service)
+        const selectedAccount = await selectAccount(accounts)
+
+        if (selectedAccount) {
+          handler.removeAuth(selectedAccount, service)
+        }
+      }
     } catch (error) {
       const {message} = error as Error
       credDebug(message)
@@ -112,7 +133,6 @@ export async function removeAuth(account: string, hosts: string[], service?: str
 
 /**
  * Factory function to create the appropriate credential handler based on platform.
- * @private
  * @param store - The type of credential store to use
  * @returns A handler instance for the specified store
  */

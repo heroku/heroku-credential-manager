@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@heroku/heroku-credential-manager",
-  "version": "0.0.0",
+  "version": "0.0.1-beta.0",
   "description": "Heroku credential management for the CLI",
   "author": "Heroku",
   "license": "Apache-2.0",

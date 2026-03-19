@@ -51,6 +51,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "prepublishOnly": "npm run build",
     "build": "npm run clean && tsc",
     "clean": "rm -rf dist",
     "lint": "eslint . --ext .ts --config .eslintrc.cjs",

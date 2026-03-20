@@ -54,6 +54,7 @@
     "build": "npm run clean && tsc",
     "clean": "rm -rf dist",
     "lint": "eslint . --ext .ts --config .eslintrc.cjs",
+    "probe:linux-secret": "bash scripts/ci/probe-linux-secret.sh",
     "probe:macos-keychain": "bash scripts/ci/probe-macos-keychain.sh",
     "probe:windows-credential": "powershell -NoProfile -File scripts/ci/probe-windows-credential.ps1",
     "test": "c8 mocha --forbid-only \"test/**/*.test.ts\"",

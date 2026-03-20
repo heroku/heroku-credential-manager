@@ -57,7 +57,8 @@
     "probe:linux-secret": "bash scripts/ci/probe-linux-secret.sh",
     "probe:macos-keychain": "bash scripts/ci/probe-macos-keychain.sh",
     "probe:windows-credential": "powershell -NoProfile -File scripts/ci/probe-windows-credential.ps1",
-    "test": "c8 mocha --forbid-only \"test/**/*.test.ts\"",
+    "test": "c8 mocha --forbid-only --ignore \"test/acceptance/**\" \"test/**/*.test.ts\"",
+    "test:acceptance": "c8 mocha --forbid-only \"test/acceptance/**/*.test.ts\"",
     "test:local": "c8 mocha \"${npm_config_file:-test/**/*.test.+(ts|tsx)}\""
   }
 }

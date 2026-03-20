@@ -15,14 +15,11 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - run: npm ci
-      - name: probe Linux secret-tool
-        run: npm run probe:linux-secret
-      - name: probe macOS keychain
-        run: npm run probe:macos-keychain
-      - name: probe Windows Credential Manager
-        if: runner.os == 'Windows'
-        run: npm run probe:windows-credential
       - name: unit tests
         run: npm run test
+      - name: acceptance tests
+        env:
+          ACCEPTANCE_TESTS: 'true'
+        run: npm run test:acceptance
       - name: linting
         run: npm run lint

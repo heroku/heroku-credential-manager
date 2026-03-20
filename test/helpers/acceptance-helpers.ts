@@ -1,4 +1,7 @@
 import childProcess from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 /**
  * Skip the current suite or test unless ACCEPTANCE_TESTS=true.
@@ -45,4 +48,44 @@ export function isLinuxWithSecretTool(): boolean {
  */
 export function hasNativeCredentialStore(): boolean {
   return isMacOS() || isWindows() || isLinuxWithSecretTool()
+}
+
+/**
+ * Result of setting up a temp directory for netrc-only acceptance tests.
+ * Call restore() in afterEach/after to reset env and remove the directory.
+ */
+export type TempNetrcDir = {
+  dir: string
+  restore: () => void
+}
+
+/**
+ * Creates a temp directory and sets HOME (and on Windows, USERPROFILE) so that
+ * .netrc reads/writes go to the temp dir.
+ */
+export function setupTempNetrcDir(): TempNetrcDir {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'heroku-credential-manager-acceptance-'))
+  const originalHome = process.env.HOME
+  const originalUserProfile = process.env.USERPROFILE
+
+  process.env.HOME = dir
+  if (isWindows()) {
+    process.env.USERPROFILE = dir
+  }
+
+  return {
+    dir,
+    restore() {
+      process.env.HOME = originalHome
+      if (isWindows()) {
+        process.env.USERPROFILE = originalUserProfile
+      }
+
+      try {
+        fs.rmSync(dir, {force: true, recursive: true})
+      } catch {
+        // ignore cleanup errors
+      }
+    },
+  }
 }

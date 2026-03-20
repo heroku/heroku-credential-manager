@@ -11,6 +11,7 @@ describe('acceptance smoke tests', function () {
     if (!hasNativeCredentialStore()) {
       this.skip()
     }
+
     expect(true).to.be.true
   })
 })

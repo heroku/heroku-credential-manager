@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.2-beta.0](https://github.com/heroku/heroku-credential-manager/compare/heroku-credential-manager-v0.0.1-beta.0...heroku-credential-manager-v0.0.2-beta.0) (2026-03-20)
+
+
+### Miscellaneous Chores
+
+* release 0.0.2-beta.0 ([#28](https://github.com/heroku/heroku-credential-manager/issues/28)) ([672c626](https://github.com/heroku/heroku-credential-manager/commit/672c626953d2051d2d8b3eea923340625b318c2e))
+
 ## [0.0.1-beta.0](https://github.com/heroku/heroku-credential-manager/compare/heroku-credential-manager-v0.0.0-beta.0...heroku-credential-manager-v0.0.1-beta.0) (2026-03-19)
 
 

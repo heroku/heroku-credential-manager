@@ -17,6 +17,9 @@ jobs:
       - run: npm ci
       - name: probe macOS keychain
         run: npm run probe:macos-keychain
+      - name: probe Windows Credential Manager
+        if: runner.os == 'Windows'
+        run: npm run probe:windows-credential
       - name: unit tests
         run: npm run test
       - name: linting

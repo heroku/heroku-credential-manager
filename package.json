@@ -54,6 +54,7 @@
     "build": "npm run clean && tsc",
     "clean": "rm -rf dist",
     "lint": "eslint . --ext .ts --config .eslintrc.cjs",
+    "probe:macos-keychain": "bash scripts/ci/probe-macos-keychain.sh",
     "test": "c8 mocha --forbid-only \"test/**/*.test.ts\"",
     "test:local": "c8 mocha \"${npm_config_file:-test/**/*.test.+(ts|tsx)}\""
   }

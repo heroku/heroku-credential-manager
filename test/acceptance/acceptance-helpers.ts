@@ -3,6 +3,40 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
+export const ACCEPTANCE_HOST_1 = 'acceptance.test.heroku.com'
+export const ACCEPTANCE_HOST_2 = 'acceptance-2.test.heroku.com'
+
+export const ACCEPTANCE_SERVICE_1 = 'heroku-cli-acceptance-test'
+export const ACCEPTANCE_SERVICE_2 = 'heroku-cli-acceptance-test-2'
+
+export type Fixture = {
+  account: string,
+  hosts: string[],
+  service: string,
+  token: string,
+}
+
+export const credentials: Record<string, Fixture> = {
+  'account-different-service': {
+    account: 'acceptance-test-different-service@example.com',
+    hosts: [ACCEPTANCE_HOST_1],
+    service: ACCEPTANCE_SERVICE_2,
+    token: 'test-acceptance-token-12348',
+  },
+  'account-multiple-hosts': {
+    account: 'acceptance-test-multiple-hosts@example.com',
+    hosts: [ACCEPTANCE_HOST_1, ACCEPTANCE_HOST_2],
+    service: ACCEPTANCE_SERVICE_1,
+    token: 'test-acceptance-token-12347',
+  },
+  'account-one-host': {
+    account: 'acceptance-test-one-host@example.com',
+    hosts: [ACCEPTANCE_HOST_1],
+    service: ACCEPTANCE_SERVICE_1,
+    token: 'test-acceptance-token-12345',
+  },
+} as const satisfies Record<string, Fixture>
+
 /**
  * Skip the current suite or test unless ACCEPTANCE_TESTS=true.
  */

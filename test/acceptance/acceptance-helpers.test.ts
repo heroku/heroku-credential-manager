@@ -1,9 +1,13 @@
 import {expect} from 'chai'
 import fs from 'node:fs'
 
-import {isWindows, setupTempNetrcDir} from './acceptance-helpers.js'
+import {isWindows, setupTempNetrcDir, skipUnlessAcceptanceEnv} from './acceptance-helpers.js'
 
 describe('acceptance helpers', function () {
+  before(function () {
+    skipUnlessAcceptanceEnv(this)
+  })
+
   describe('setupTempNetrcDir', function () {
     it('should setup and restore a temp directory', function () {
       const originalHome = process.env.HOME

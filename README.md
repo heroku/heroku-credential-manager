@@ -1,7 +1,7 @@
 
 # Heroku Credential Manager
 
-**NOTE**: This plugin has been archived and is no longer maintained.
+**NOTE**: This plugin has been archived, because of difficulty open sourcing the module. Instead it is now being developed as [part of heroku-cli-command](https://github.com/heroku/heroku-cli-command/tree/feat/credential-mgr-integration).
 
 A tool for managing Heroku credential storage for the CLI. It uses native keychain services on macOS, Windows, and Gnu-based Linux systems by default to store credentials securely.
 

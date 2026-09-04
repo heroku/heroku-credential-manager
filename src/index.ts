@@ -1,12 +1,13 @@
 import debug from 'debug'
 
+import type {NetrcAuthEntry} from './lib/types.js'
+
 import {LinuxHandler} from './credential-handlers/linux-handler.js'
 import {MacOSHandler} from './credential-handlers/macos-handler.js'
 import {NetrcHandler} from './credential-handlers/netrc-handler.js'
 import {WindowsHandler} from './credential-handlers/windows-handler.js'
 import {selectAccount} from './lib/account-selector.js'
 import {CredentialStore, getStorageConfig} from './lib/credential-storage-selector.js'
-import {NetrcAuthEntry} from './lib/types.js'
 
 const credDebug = debug('heroku-credential-manager')
 

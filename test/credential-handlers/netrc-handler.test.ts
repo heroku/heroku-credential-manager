@@ -1,7 +1,7 @@
 import chai, {expect} from 'chai'
 import chaiAsPromised from 'chai-as-promised'
 
-import {MachineToken} from '../../src/lib/netrc-parser.js'
+import type {MachineToken} from '../../src/lib/netrc-parser.js'
 
 chai.use(chaiAsPromised)
 

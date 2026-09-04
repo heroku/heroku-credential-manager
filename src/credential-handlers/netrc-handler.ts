@@ -1,7 +1,8 @@
 import debug from 'debug'
 
+import type {NetrcAuthEntry} from '../lib/types.js'
+
 import {Netrc} from '../lib/netrc-parser.js'
-import {NetrcAuthEntry} from '../lib/types.js'
 
 const credDebug = debug('heroku-credential-manager')
 

@@ -1,7 +1,7 @@
 import {Scrubber} from '@heroku/js-blanket'
 import childProcess from 'node:child_process'
 
-import {KeychainAuthEntry} from '../lib/types.js'
+import type {KeychainAuthEntry} from '../lib/types.js'
 
 /**
  * Handles credential storage and retrieval using the Windows Credential Manager.

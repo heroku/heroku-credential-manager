@@ -34,7 +34,7 @@
     "eslint-plugin-import": "^2.31.0",
     "eslint-plugin-mocha": "^10.4.3",
     "fs-extra": "^11.4.0",
-    "mocha": "^12.0.0",
+    "mocha": "^11.7.5",
     "nock": "^13.5.0",
     "sinon": "^18.0.1",
     "sinon-chai": "^3.7.0",
@@ -49,6 +49,11 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "overrides": {
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "^9.0.7"
+    }
   },
   "scripts": {
     "prepublishOnly": "npm run build",

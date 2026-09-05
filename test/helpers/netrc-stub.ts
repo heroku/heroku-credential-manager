@@ -17,10 +17,12 @@ const mockNetrc = {
 
 let loadSyncStub: SinonStub | undefined
 let loadStub: SinonStub | undefined
+let saveStub: SinonStub | undefined
+let saveSyncStub: SinonStub | undefined
 
 /**
  * Stubs the Netrc prototype's `loadSync` and `load` methods to return mock credentials.
- * This prevents tests from reading the actual .netrc file on disk.
+ * Stubs `save` / `saveSync` so tests never write to the real netrc path.
  * Safe to call multiple times; will not re-stub if already stubbed.
  * @returns {void}
  */
@@ -38,10 +40,18 @@ export function stubNetrc() {
       return Promise.resolve()
     }) as SinonStub
   }
+
+  if (!saveStub) {
+    saveStub = stub(Netrc.prototype, 'save').resolves()
+  }
+
+  if (!saveSyncStub) {
+    saveSyncStub = stub(Netrc.prototype, 'saveSync')
+  }
 }
 
 /**
- * Restores the original `loadSync` and `load` methods on the Netrc prototype.
+ * Restores the original Netrc prototype methods.
  * Should be called in test teardown to clean up stubs.
  * @returns {void}
  */
@@ -54,5 +64,15 @@ export function restoreNetrcStub() {
   if (loadStub) {
     loadStub.restore()
     loadStub = undefined
+  }
+
+  if (saveStub) {
+    saveStub.restore()
+    saveStub = undefined
+  }
+
+  if (saveSyncStub) {
+    saveSyncStub.restore()
+    saveSyncStub = undefined
   }
 }

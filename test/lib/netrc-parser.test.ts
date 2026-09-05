@@ -1,12 +1,16 @@
 import {expect} from 'chai'
 import {ExecaError, execa} from 'execa'
 import fs from 'fs-extra'
+import os from 'node:os'
+import path from 'node:path'
+import sinon from 'sinon'
 
-import {Netrc} from '../../src/lib/netrc-parser.js'
+import {Netrc, parse} from '../../src/lib/netrc-parser.js'
 
 process.env.NETRC_PARSER_DEBUG = '1'
 
 const skipOnWindows = process.platform === 'win32' ? it.skip : it
+const permissionBits = (mode: number) => mode % 0o1000
 
 const configureGpgMock = async () => {
   // Create and set temp gpg home directory
@@ -31,18 +35,27 @@ describe('netrc', function () {
   afterEach(function () {
     fs.removeSync('tmp')
     delete process.env.GNUPGHOME
+    sinon.restore()
   })
 
-  it('can read system netrc', function () {
+  it('can read an isolated default netrc synchronously', function () {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heroku-netrc-default-'))
+    sinon.stub(os, 'homedir').returns(home)
     const netrc = new Netrc()
+    expect(netrc.file).to.equal(path.join(home, '.netrc'))
     netrc.loadSync()
     expect(Boolean(netrc.machines)).to.be.true
+    fs.removeSync(home)
   })
 
-  it('can read system netrc async', async function () {
+  it('can read an isolated default netrc asynchronously', async function () {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heroku-netrc-default-'))
+    sinon.stub(os, 'homedir').returns(home)
     const netrc = new Netrc()
+    expect(netrc.file).to.equal(path.join(home, '.netrc'))
     await netrc.load()
     expect(Boolean(netrc.machines)).to.be.true
+    fs.removeSync(home)
   })
 
   it('reads basic', function () {
@@ -169,6 +182,7 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
     })
     const f = 'tmp/netrc.gpg'
     fs.writeFileSync(f, gpgEncrypted)
+    fs.chmodSync(f, 0o644)
     const netrc = new Netrc(f)
     netrc.loadSync()
 
@@ -178,6 +192,7 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
 
     netrc.saveSync()
     expect(fs.readFileSync(f, {encoding: 'utf8'})).to.contain('-----BEGIN PGP MESSAGE-----')
+    expect(permissionBits(fs.statSync(f).mode)).to.equal(0o600)
   })
 
   // eslint-disable-next-line mocha/no-setup-in-describe
@@ -190,6 +205,7 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
     })
     const f = 'tmp/netrc.gpg'
     await fs.writeFile(f, gpgEncrypted)
+    await fs.chmod(f, 0o644)
     const netrc = new Netrc(f)
     await netrc.load()
 
@@ -199,6 +215,129 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
 
     await netrc.save()
     expect(fs.readFileSync(f, {encoding: 'utf8'})).to.contain('-----BEGIN PGP MESSAGE-----')
+    expect(permissionBits(fs.statSync(f).mode)).to.equal(0o600)
+  })
+
+  // eslint-disable-next-line mocha/no-setup-in-describe
+  skipOnWindows('synchronously tightens existing file permissions and preserves formatting', function () {
+    const f = 'tmp/netrc'
+    const contents = `# credentials
+machine api.heroku.com
+  login user@example.com
+  password secret # keep this comment
+`
+    fs.writeFileSync(f, contents)
+    fs.chmodSync(f, 0o644)
+
+    const netrc = new Netrc(f)
+    netrc.loadSync()
+    netrc.saveSync()
+
+    expect(fs.readFileSync(f, 'utf8')).to.equal(contents)
+    expect(permissionBits(fs.statSync(f).mode)).to.equal(0o600)
+  })
+
+  // eslint-disable-next-line mocha/no-setup-in-describe
+  skipOnWindows('asynchronously tightens existing file permissions and preserves formatting', async function () {
+    const f = 'tmp/netrc'
+    const contents = `# credentials
+machine api.heroku.com
+  login user@example.com
+  password secret # keep this comment
+`
+    fs.writeFileSync(f, contents)
+    fs.chmodSync(f, 0o644)
+
+    const netrc = new Netrc(f)
+    await netrc.load()
+    await netrc.save()
+
+    expect(fs.readFileSync(f, 'utf8')).to.equal(contents)
+    expect(permissionBits(fs.statSync(f).mode)).to.equal(0o600)
+  })
+
+  // eslint-disable-next-line mocha/no-setup-in-describe
+  skipOnWindows('creates new files with restricted permissions for sync and async saves', async function () {
+    const syncFile = 'tmp/netrc-sync'
+    const asyncFile = 'tmp/netrc-async'
+    const syncNetrc = new Netrc(syncFile)
+    syncNetrc.loadSync()
+    syncNetrc.machines['sync.heroku.com'] = {login: 'sync-user', password: 'sync-secret'}
+    syncNetrc.saveSync()
+
+    const asyncNetrc = new Netrc(asyncFile)
+    await asyncNetrc.load()
+    asyncNetrc.machines['async.heroku.com'] = {login: 'async-user', password: 'async-secret'}
+    await asyncNetrc.save()
+
+    expect(permissionBits(fs.statSync(syncFile).mode)).to.equal(0o600)
+    expect(permissionBits(fs.statSync(asyncFile).mode)).to.equal(0o600)
+  })
+
+  // eslint-disable-next-line mocha/no-setup-in-describe
+  skipOnWindows('synchronously refuses a symlink target without modifying its destination', function () {
+    const target = 'tmp/netrc-target'
+    const f = 'tmp/netrc'
+    const contents = 'machine api.heroku.com login user@example.com password original\n'
+    fs.writeFileSync(target, contents)
+    fs.symlinkSync(path.basename(target), f)
+
+    const netrc = new Netrc(f)
+    netrc.loadSync()
+    netrc.machines['api.heroku.com'].password = 'replacement'
+
+    expect(() => netrc.saveSync()).to.throw()
+    expect(fs.readFileSync(target, 'utf8')).to.equal(contents)
+    expect(fs.lstatSync(f).isSymbolicLink()).to.equal(true)
+  })
+
+  // eslint-disable-next-line mocha/no-setup-in-describe
+  skipOnWindows('asynchronously refuses a symlink target without modifying its destination', async function () {
+    const target = 'tmp/netrc-target'
+    const f = 'tmp/netrc'
+    const contents = 'machine api.heroku.com login user@example.com password original\n'
+    fs.writeFileSync(target, contents)
+    fs.symlinkSync(path.basename(target), f)
+
+    const netrc = new Netrc(f)
+    await netrc.load()
+    netrc.machines['api.heroku.com'].password = 'replacement'
+
+    try {
+      await netrc.save()
+      expect.fail('Expected an error to be thrown')
+    } catch (error: unknown) {
+      expect(error).to.be.instanceOf(Error)
+    }
+
+    expect(fs.readFileSync(target, 'utf8')).to.equal(contents)
+    expect(fs.lstatSync(f).isSymbolicLink()).to.equal(true)
+  })
+
+  // eslint-disable-next-line mocha/no-setup-in-describe
+  skipOnWindows('refuses encrypted symlink targets without modifying the destination', async function () {
+    await configureGpgMock().catch(error => {
+      if (error instanceof ExecaError && error.code === 'ENOENT') {
+        console.log('GPG not found, skipping test')
+        return this.skip()
+      }
+    })
+    const target = 'tmp/netrc-target.gpg'
+    const f = 'tmp/netrc.gpg'
+    const contents = 'encrypted destination'
+    fs.writeFileSync(target, contents)
+    fs.symlinkSync(path.basename(target), f)
+    const netrc = new Netrc(f)
+    netrc.machines = parse('')
+
+    try {
+      await netrc.save()
+      expect.fail('Expected an error to be thrown')
+    } catch (error: unknown) {
+      expect(error).to.be.instanceOf(Error)
+    }
+
+    expect(fs.readFileSync(target, 'utf8')).to.equal(contents)
   })
 
   it('saving', function () {
@@ -580,7 +719,7 @@ machine foo password uu
   })
 
   it('extra code coverage checks', function () {
-    const netrc = new Netrc()
+    const netrc = new Netrc('tmp/netrc-coverage')
     netrc.loadSync()
     expect(Symbol('test') in netrc.machines).to.equal(false)
     netrc.machines.a = {login: 'foo'}

@@ -68,4 +68,4 @@ Issues labelled `good first contribution`.
 
 
 # License
-By contributing your code, you agree to license your contribution under the terms of our project [LICENSE](LICENSE) and to sign the [Salesforce CLA](https://cla.salesforce.com/sign-cla)
+By contributing your code, you agree to license your contribution under the terms of our project [LICENSE.txt](LICENSE.txt) and to sign the [Salesforce CLA](https://cla.salesforce.com/sign-cla)

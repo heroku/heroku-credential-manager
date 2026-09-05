@@ -6,12 +6,6 @@ on:
       - "main"
     paths:
       - ".heroku/components-inventory/*.json"
-  pull_request:
-    types:
-      - opened
-      - synchronize
-    paths:
-      - ".heroku/components-inventory/*.json"
 jobs:
   action:
     runs-on: sfdc-hk-ubuntu-latest

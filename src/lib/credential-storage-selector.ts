@@ -14,74 +14,6 @@ export type StorageConfig = {
 }
 
 /**
- * Determines whether to use OS-native credential storage, .netrc file, or both.
- *
- * @returns Object containing storage configuration
- *
- * @example
- * ```typescript
- * const config = getStorageConfig()
- * if (config.credentialStore === CredentialStore.MacOSKeychain) {
- *   // Use macOS handler
- * }
- * if (config.useNetrc) {
- *   // Also use netrc handler
- * }
- * ```
- */
-export function getStorageConfig(): StorageConfig {
-  const {env, platform} = process
-  const {HEROKU_NETRC_WRITE} = env
-
-  // Forces the use of the .netrc file only
-  if (HEROKU_NETRC_WRITE?.toLowerCase() === 'true') {
-    return {
-      credentialStore: null,
-      useNetrc: true,
-    }
-  }
-
-  switch (platform) {
-  case 'darwin': {
-    return {
-      credentialStore: CredentialStore.MacOSKeychain,
-      useNetrc: true,
-    }
-  }
-
-  case 'win32': {
-    return {
-      credentialStore: CredentialStore.WindowsCredentialManager,
-      useNetrc: true,
-    }
-  }
-
-  case 'linux': {
-    if (hasSecretTool()) {
-      return {
-        credentialStore: CredentialStore.LinuxSecretService,
-        useNetrc: true,
-      }
-    }
-
-    // secret-tool not accessible, fall back to netrc only
-    return {
-      credentialStore: null,
-      useNetrc: true,
-    }
-  }
-
-  default: {
-    // Unsupported platform, fall back to netrc only
-    return {
-      credentialStore: null,
-      useNetrc: true,
-    }
-  }
-  }
-}
-
-/**
  * Determines whether the secret-tool command is accessible.
  *
  * @returns True if secret-tool is installed and accessible, false otherwise
@@ -94,5 +26,57 @@ function hasSecretTool(): boolean {
     return true
   } catch {
     return false
+  }
+}
+
+/**
+ * Native credential backend for this platform (Keychain, Secret Service, Windows vault).
+ * Ignores HEROKU_NETRC_WRITE so logout can clear credentials written before that mode was used.
+ */
+export function getNativeCredentialStore(): CredentialStore | null {
+  const {platform} = process
+
+  switch (platform) {
+  case 'darwin': {
+    return CredentialStore.MacOSKeychain
+  }
+
+  case 'linux': {
+    return hasSecretTool() ? CredentialStore.LinuxSecretService : null
+  }
+
+  case 'win32': {
+    return CredentialStore.WindowsCredentialManager
+  }
+
+  default: {
+    return null
+  }
+  }
+}
+
+/**
+ * Determines whether to use OS-native credential storage or .netrc file.
+ *
+ * By default, uses the native credential store exclusively when available.
+ * `HEROKU_NETRC_WRITE=true` selects netrc-only mode, skipping the native store entirely.
+ *
+ * @returns Object containing storage configuration
+ */
+export function getStorageConfig(): StorageConfig {
+  const netrcWriteLegacy = process.env.HEROKU_NETRC_WRITE?.toLowerCase() === 'true'
+
+  if (netrcWriteLegacy) {
+    return {
+      credentialStore: null,
+      useNetrc: true,
+    }
+  }
+
+  const nativeCredentialStore = getNativeCredentialStore()
+
+  return {
+    credentialStore: nativeCredentialStore,
+    useNetrc: !nativeCredentialStore,
   }
 }

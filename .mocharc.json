@@ -1,10 +1,6 @@
 {
-  "require": [
-    "./test/hooks.ts"
-  ],
   "watch-extensions": ["ts"],
   "recursive": true,
   "reporter": "spec",
-  "timeout": 15000,
-  "node-option": ["import=./test/register.mjs"]
+  "timeout": 15000
 }

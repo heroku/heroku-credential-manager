@@ -1,20 +1,96 @@
-import {Scrubber} from '@heroku/js-blanket'
 import childProcess from 'node:child_process'
 
 import type {KeychainAuthEntry} from '../lib/types.js'
+
+const missingCredentialExitCode = 3
+const missingCredentialSentinel = 'HEROKU_CREDENTIAL_NOT_FOUND'
+
+// Caller-provided values are decoded from the environment/stdin; this source must remain fixed.
+const passwordVaultScript = `
+$ErrorActionPreference = 'Stop'
+[void][Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]
+
+$missingCredentialHResult = -2147023728 # 0x80070490 (ERROR_NOT_FOUND)
+$missingCredentialExitCode = 3
+$missingCredentialSentinel = 'HEROKU_CREDENTIAL_NOT_FOUND'
+
+function ConvertFrom-HerokuBase64([string] $Value) {
+  if ([string]::IsNullOrEmpty($Value)) { return '' }
+  return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Value))
+}
+
+function ConvertTo-HerokuBase64([string] $Value) {
+  return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Value))
+}
+
+$operation = $env:HEROKU_CREDENTIAL_OPERATION
+$service = ConvertFrom-HerokuBase64 $env:HEROKU_CREDENTIAL_SERVICE
+$account = ConvertFrom-HerokuBase64 $env:HEROKU_CREDENTIAL_ACCOUNT
+$vault = New-Object Windows.Security.Credentials.PasswordVault
+
+switch ($operation) {
+  'get' {
+    $credential = $vault.Retrieve($service, $account)
+    $credential.RetrievePassword()
+    ConvertTo-HerokuBase64 $credential.Password
+  }
+  'list' {
+    try {
+      $credentials = $vault.FindAllByResource($service)
+    } catch {
+      if ($_.Exception.HResult -eq $missingCredentialHResult) {
+        [Console]::Error.WriteLine($missingCredentialSentinel)
+        exit $missingCredentialExitCode
+      } else {
+        throw
+      }
+    }
+    $credentials | ForEach-Object { ConvertTo-HerokuBase64 $_.UserName }
+  }
+  'remove' {
+    try {
+      $credential = $vault.Retrieve($service, $account)
+    } catch {
+      if ($_.Exception.HResult -eq $missingCredentialHResult) {
+        [Console]::Error.WriteLine($missingCredentialSentinel)
+        exit $missingCredentialExitCode
+      } else {
+        throw
+      }
+    }
+    $vault.Remove($credential)
+  }
+  'save' {
+    try {
+      $credential = $vault.Retrieve($service, $account)
+      $vault.Remove($credential)
+    } catch {
+      if ($_.Exception.HResult -ne $missingCredentialHResult) { throw }
+    }
+    $tokenBase64 = [Console]::In.ReadToEnd()
+    $token = ConvertFrom-HerokuBase64 $tokenBase64
+    $credential = New-Object Windows.Security.Credentials.PasswordCredential($service, $account, $token)
+    $vault.Add($credential)
+  }
+  default { throw 'Unsupported credential operation' }
+}
+`
+
+type PasswordVaultOperation = 'get' | 'list' | 'remove' | 'save'
+
+interface PowerShellResult {
+  error?: Error
+  signal?: NodeJS.Signals | null
+  status: null | number
+  stderr?: Buffer | null | string
+  stdout?: Buffer | null | string
+}
 
 /**
  * Handles credential storage and retrieval using the Windows Credential Manager.
  * Uses PowerShell commands to interact with the Windows.Security.Credentials.PasswordVault API.
  */
 export class WindowsHandler {
-  private readonly scrubber = new Scrubber({
-    patterns: [
-      /Retrieve\("([^"]+)",\s*"([^"]+)"\)/g, // Scrub account in Retrieve("service", "account")
-      /PasswordCredential\("([^"]+)",\s*"([^"]+)",\s*"([^"]+)"\)/g, // Scrub account and token in PasswordCredential
-    ],
-  })
-
   /**
    * Retrieves the authentication token from Windows Credential Manager.
    * @param account - The account login to use (e.g. 'test@example.com')
@@ -24,16 +100,9 @@ export class WindowsHandler {
    */
   public getAuth(account: string, service: string): string {
     try {
-      const psCommand = `
-      [void]
-      [Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]
-      $vault = New-Object Windows.Security.Credentials.PasswordVault
-      $credential = $vault.Retrieve("${service}", "${account}")
-      $credential.Password
-    `
-
-      const output = childProcess.execSync(psCommand, {encoding: 'utf8', shell: 'powershell'})
-      const token = output.trim()
+      const result = this.invokePowerShell('get', service, account)
+      this.throwOnFailure(result)
+      const token = this.decodeValue(this.outputText(result.stdout).trim())
 
       if (!token) {
         throw new Error('Token not found')
@@ -41,8 +110,7 @@ export class WindowsHandler {
 
       return token
     } catch (error) {
-      const {message} = error as Error
-      throw new Error(`Failed to retrieve token from Windows Credential Manager: ${this.scrubError(message)}`)
+      throw new Error(`Failed to retrieve token from Windows Credential Manager: ${this.scrubError(error, [account, service])}`)
     }
   }
 
@@ -54,35 +122,19 @@ export class WindowsHandler {
    */
   public listAccounts(service: string): string[] {
     try {
-      const psCommand = `
-      [void]
-      [Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]
-      $vault = New-Object Windows.Security.Credentials.PasswordVault
-      try {
-        $creds = $vault.FindAllByResource("${service}")
-        $creds | ForEach-Object { $_.UserName }
-      } catch {
-        # No credentials found for this resource
-        exit 0
+      const result = this.invokePowerShell('list', service)
+      if (this.isMissingCredential(result)) {
+        return []
       }
-    `
 
-      const output = childProcess.execSync(psCommand, {encoding: 'utf8', shell: 'powershell'})
-
-      // Expected output format:
-      // user1@example.com
-      // user2@example.com
-      // ...
-
-      const accounts = output
-        .split('\n')
+      this.throwOnFailure(result)
+      return this.outputText(result.stdout)
+        .split(/\r?\n/)
         .map(line => line.trim())
-        .filter(line => line.length > 0)
-
-      return accounts
+        .filter(Boolean)
+        .map(line => this.decodeValue(line))
     } catch (error) {
-      const {message} = error as Error
-      throw new Error(`Failed to list accounts in Windows Credential Manager: ${this.scrubError(message)}`)
+      throw new Error(`Failed to list accounts in Windows Credential Manager: ${this.scrubError(error, [service])}`)
     }
   }
 
@@ -95,16 +147,14 @@ export class WindowsHandler {
    */
   public removeAuth(account: string, service: string): void {
     try {
-      const psCommand = `
-      [void][Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]
-      $vault = New-Object Windows.Security.Credentials.PasswordVault
-      $credential = $vault.Retrieve("${service}", "${account}")
-      $vault.Remove($credential)
-    `
-      childProcess.execSync(psCommand, {encoding: 'utf8', shell: 'powershell'})
+      const result = this.invokePowerShell('remove', service, account)
+      if (this.isMissingCredential(result)) {
+        return
+      }
+
+      this.throwOnFailure(result)
     } catch (error) {
-      const {message} = error as Error
-      throw new Error(`Failed to remove token from Windows Credential Manager: ${this.scrubError(message)}`)
+      throw new Error(`Failed to remove token from Windows Credential Manager: ${this.scrubError(error, [account, service])}`)
     }
   }
 
@@ -117,39 +167,92 @@ export class WindowsHandler {
    */
   public saveAuth(auth: KeychainAuthEntry): void {
     try {
-      try {
-        const removeCommand = `
-        [void][Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]
-        $vault = New-Object Windows.Security.Credentials.PasswordVault
-        $credential = $vault.Retrieve("${auth.service}", "${auth.account}")
-        $vault.Remove($credential)
-      `
-        childProcess.execSync(removeCommand, {encoding: 'utf8', shell: 'powershell'})
-      } catch {
-        // noop - item does not exist
-      }
-
-      const addCommand = `
-      [void][Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]
-      $vault = New-Object Windows.Security.Credentials.PasswordVault
-      $credential = New-Object Windows.Security.Credentials.PasswordCredential("${auth.service}", "${auth.account}", "${auth.token}")
-      $vault.Add($credential)
-    `
-      childProcess.execSync(addCommand, {encoding: 'utf8', shell: 'powershell'})
+      const result = this.invokePowerShell('save', auth.service, auth.account, auth.token)
+      this.throwOnFailure(result)
     } catch (error) {
-      const {message} = error as Error
-      throw new Error(`Failed to store token in Windows Credential Manager: ${this.scrubError(message)}`)
+      throw new Error(`Failed to store token in Windows Credential Manager: ${this.scrubError(error, [auth.account, auth.service, auth.token])}`)
     }
   }
 
-  /**
-   * Scrubs account names and passwords/tokens from error messages.
-   *
-   * @param message - The error message to scrub
-   * @returns The scrubbed error message with sensitive data replaced by "[SCRUBBED]"
-   */
-  private scrubError(message: string): string {
-    const result = this.scrubber.scrub({message})
-    return result.data.message
+  private decodeValue(value: string): string {
+    return Buffer.from(value, 'base64').toString('utf8')
+  }
+
+  private encodeValue(value: string): string {
+    return Buffer.from(value, 'utf8').toString('base64')
+  }
+
+  private invokePowerShell(operation: PasswordVaultOperation, service: string, account = '', token = ''): PowerShellResult {
+    this.validateValues([service, account, token])
+
+    return childProcess.spawnSync(
+      'powershell.exe',
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', passwordVaultScript],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          HEROKU_CREDENTIAL_ACCOUNT: this.encodeValue(account),
+          HEROKU_CREDENTIAL_OPERATION: operation,
+          HEROKU_CREDENTIAL_SERVICE: this.encodeValue(service),
+        },
+        input: token ? this.encodeValue(token) : '',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    )
+  }
+
+  private isMissingCredential(result: PowerShellResult): boolean {
+    return !result.error
+      && !result.signal
+      && result.status === missingCredentialExitCode
+      && this.outputText(result.stdout) === ''
+      && new RegExp(`^${missingCredentialSentinel}(?:\\r?\\n)?$`).test(this.outputText(result.stderr))
+  }
+
+  private outputText(output: Buffer | null | string | undefined): string {
+    return output?.toString() ?? ''
+  }
+
+  private scrubError(error: unknown, secrets: string[]): string {
+    let message = error instanceof Error ? error.message : String(error)
+    const values = secrets.flatMap(secret => {
+      if (!secret) return []
+
+      const normalizedValues = new Set([
+        secret,
+        secret.replaceAll(/\r\n?|\n/g, '\n'),
+        secret.replaceAll(/\r\n?|\n/g, '\r\n'),
+      ])
+
+      return [...normalizedValues].flatMap(value => [value, this.encodeValue(value)])
+    })
+
+    for (const value of [...new Set(values)].sort((left, right) => right.length - left.length)) {
+      message = message.split(value).join('[SCRUBBED]')
+    }
+
+    return message
+  }
+
+  private throwOnFailure(result: PowerShellResult): void {
+    if (result.error) {
+      throw result.error
+    }
+
+    if (result.signal) {
+      throw new Error(`terminated by signal ${result.signal}`)
+    }
+
+    if (result.status !== 0) {
+      const detail = this.outputText(result.stderr).trim() || `PowerShell exited with status ${result.status ?? 'unknown'}`
+      throw new Error(detail)
+    }
+  }
+
+  private validateValues(values: string[]): void {
+    if (values.some(value => value.includes('\0'))) {
+      throw new Error('Credential values must not contain NUL characters')
+    }
   }
 }

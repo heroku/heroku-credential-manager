@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        os: [sfdc-hk-macos-latest, sfdc-hk-windows-latest, sfdc-hk-ubuntu-latest]
         node-version: [20.5.0, 22.x]
     steps:
       - uses: actions/checkout@v7

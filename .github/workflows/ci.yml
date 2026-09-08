@@ -13,11 +13,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: sfdc-hk-ubuntu-latest
             node-version: 20.5.0
-          - os: windows-latest
+          - os: sfdc-hk-windows-latest
             node-version: 22.x
-          - os: macos-latest
+          - os: sfdc-hk-macos-latest
             node-version: 22.x
     steps:
       - uses: actions/checkout@v7
@@ -43,11 +43,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: sfdc-hk-ubuntu-latest
             node-version: 22.x
-          - os: windows-latest
+          - os: sfdc-hk-windows-latest
             node-version: 20.5.0
-          - os: macos-latest
+          - os: sfdc-hk-macos-latest
             node-version: 20.5.0
     steps:
       - uses: actions/checkout@v7

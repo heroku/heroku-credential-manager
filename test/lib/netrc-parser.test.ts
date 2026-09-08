@@ -12,6 +12,32 @@ process.env.NETRC_PARSER_DEBUG = '1'
 const skipOnWindows = process.platform === 'win32' ? it.skip : it
 const permissionBits = (mode: number) => mode % 0o1000
 
+function configureDefaultNetrcHome(home: string): {cleanup: () => void; filename: string} {
+  if (process.platform !== 'win32') {
+    sinon.stub(os, 'homedir').returns(home)
+    return {cleanup() {}, filename: '.netrc'}
+  }
+
+  const variables = ['HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH'] as const
+  const original = Object.fromEntries(variables.map(variable => [variable, process.env[variable]]))
+  const {root} = path.parse(home)
+  process.env.HOME = home
+  process.env.USERPROFILE = home
+  process.env.HOMEDRIVE = root.slice(0, 2)
+  process.env.HOMEPATH = home.slice(2) || path.sep
+
+  return {
+    cleanup() {
+      for (const variable of variables) {
+        const value = original[variable]
+        if (value === undefined) delete process.env[variable]
+        else process.env[variable] = value
+      }
+    },
+    filename: '_netrc',
+  }
+}
+
 const configureGpgMock = async () => {
   // Create and set temp gpg home directory
   const mockGnupgHome = 'tmp/gpg'
@@ -40,22 +66,30 @@ describe('netrc', function () {
 
   it('can read an isolated default netrc synchronously', function () {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heroku-netrc-default-'))
-    sinon.stub(os, 'homedir').returns(home)
-    const netrc = new Netrc()
-    expect(netrc.file).to.equal(path.join(home, '.netrc'))
-    netrc.loadSync()
-    expect(Boolean(netrc.machines)).to.be.true
-    fs.removeSync(home)
+    const setup = configureDefaultNetrcHome(home)
+    try {
+      const netrc = new Netrc()
+      expect(netrc.file).to.equal(path.join(home, setup.filename))
+      netrc.loadSync()
+      expect(Boolean(netrc.machines)).to.be.true
+    } finally {
+      setup.cleanup()
+      fs.removeSync(home)
+    }
   })
 
   it('can read an isolated default netrc asynchronously', async function () {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heroku-netrc-default-'))
-    sinon.stub(os, 'homedir').returns(home)
-    const netrc = new Netrc()
-    expect(netrc.file).to.equal(path.join(home, '.netrc'))
-    await netrc.load()
-    expect(Boolean(netrc.machines)).to.be.true
-    fs.removeSync(home)
+    const setup = configureDefaultNetrcHome(home)
+    try {
+      const netrc = new Netrc()
+      expect(netrc.file).to.equal(path.join(home, setup.filename))
+      await netrc.load()
+      expect(Boolean(netrc.machines)).to.be.true
+    } finally {
+      setup.cleanup()
+      fs.removeSync(home)
+    }
   })
 
   it('reads basic', function () {

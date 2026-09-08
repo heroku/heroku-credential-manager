@@ -25,7 +25,7 @@ const environment = {
 
 const mocha = path.join(repositoryRoot, 'node_modules', 'mocha', 'bin', 'mocha.js')
 const acceptanceTest = path.join(repositoryRoot, 'test', 'acceptance', 'credential-manager.acceptance.test.ts')
-const keychainPath = path.join(tempRoot, 'acceptance.keychain-db')
+const keychainPath = path.join(tempRoot, 'Library', 'Keychains', 'acceptance.keychain-db')
 const keychainPassword = 'heroku-credential-manager-acceptance'
 
 function security(...arguments_) {
@@ -37,6 +37,8 @@ function security(...arguments_) {
 }
 
 function setupMacOSKeychain() {
+  const wrapperDirectory = path.join(tempRoot, 'bin')
+  const wrapperPath = path.join(wrapperDirectory, 'security')
   fs.mkdirSync(path.join(tempRoot, 'Library', 'Preferences'), {recursive: true})
   fs.mkdirSync(path.join(tempRoot, 'Library', 'Keychains'), {recursive: true})
   security('create-keychain', '-p', keychainPassword, keychainPath)
@@ -50,6 +52,23 @@ function setupMacOSKeychain() {
   if (!searchList.includes(keychainPath) || !defaultKeychain.includes(keychainPath)) {
     throw new Error('Failed to configure the isolated acceptance keychain')
   }
+
+  fs.mkdirSync(wrapperDirectory)
+  fs.writeFileSync(wrapperPath, `#!/usr/bin/env node
+const {spawnSync} = require('node:child_process')
+
+const arguments_ = process.argv.slice(2)
+if (['add-generic-password', 'delete-generic-password', 'dump-keychain', 'find-generic-password'].includes(arguments_[0])) {
+  arguments_.push(${JSON.stringify(keychainPath)})
+}
+
+const result = spawnSync('/usr/bin/security', arguments_, {stdio: 'inherit'})
+if (result.error) throw result.error
+if (result.signal) process.kill(process.pid, result.signal)
+process.exit(result.status ?? 1)
+`)
+  fs.chmodSync(wrapperPath, 0o700)
+  environment.PATH = `${wrapperDirectory}${path.delimiter}${environment.PATH ?? ''}`
 }
 
 let result

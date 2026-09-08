@@ -26,9 +26,16 @@ const forbiddenDependencies = new Set([
   'undici',
 ])
 
-function npm(...arguments_) {
-  return execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', arguments_, {
-    cwd: consumerDirectory,
+function npm(cwd, ...arguments_) {
+  const npmCli = [
+    process.env.npm_execpath,
+    path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.resolve(path.dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ].find(candidate => candidate && fs.existsSync(candidate))
+  assert(npmCli, 'Unable to locate the npm CLI used for package verification')
+
+  return execFileSync(process.execPath, [npmCli, ...arguments_], {
+    cwd,
     encoding: 'utf8',
     env: {
       ...process.env,
@@ -119,17 +126,13 @@ try {
   fs.mkdirSync(consumerDirectory)
   fs.mkdirSync(isolatedHome)
 
-  const packOutput = execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', [
+  const packOutput = npm(packageRoot,
     'pack',
     '--ignore-scripts',
     '--json',
     '--pack-destination',
     packDirectory,
-  ], {
-    cwd: packageRoot,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'inherit'],
-  })
+  )
   const [{filename}] = JSON.parse(packOutput)
   const tarball = path.join(packDirectory, filename)
 
@@ -138,7 +141,7 @@ try {
     private: true,
     type: 'module',
   }, null, 2))
-  npm('install', '--ignore-scripts', '--no-audit', '--no-fund', tarball)
+  npm(consumerDirectory, 'install', '--ignore-scripts', '--no-audit', '--no-fund', tarball)
 
   const installedPackageRoot = path.join(consumerDirectory, 'node_modules', ...packageName.split('/'))
   const installedPackage = JSON.parse(fs.readFileSync(path.join(installedPackageRoot, 'package.json'), 'utf8'))
@@ -146,10 +149,10 @@ try {
   assert.equal(installedPackage.exports['./login'], undefined)
   const graphSize = assertSafeDistGraph(installedPackageRoot)
 
-  const dependencyTree = JSON.parse(npm('ls', '--omit=dev', '--all', '--json'))
+  const dependencyTree = JSON.parse(npm(consumerDirectory, 'ls', '--omit=dev', '--all', '--json'))
   assertProductionDependencies(dependencyTree)
 
-  npm('install', '--save-dev', '--ignore-scripts', '--no-audit', '--no-fund', 'typescript@^5.9.3', '@types/node@^22.15.3')
+  npm(consumerDirectory, 'install', '--save-dev', '--ignore-scripts', '--no-audit', '--no-fund', 'typescript@^5.9.3', '@types/node@^22.15.3')
 
   fs.writeFileSync(path.join(consumerDirectory, 'type-imports.ts'), `
 import type {AuthEntry, KeychainAuthEntry, NetrcAuthEntry, StorageConfig} from '${packageName}'
@@ -172,7 +175,7 @@ void [auth, keychain, netrc, storage, getAuth, removeAuth, saveAuth]
     },
     include: ['type-imports.ts'],
   }, null, 2))
-  execFileSync(path.join(consumerDirectory, 'node_modules', '.bin', process.platform === 'win32' ? 'tsc.cmd' : 'tsc'), ['-p', 'tsconfig.json'], {
+  execFileSync(process.execPath, [path.join(consumerDirectory, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', 'tsconfig.json'], {
     cwd: consumerDirectory,
     stdio: 'inherit',
   })

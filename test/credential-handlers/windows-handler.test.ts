@@ -213,7 +213,9 @@ describe('WindowsHandler', function () {
       handler.listAccounts('heroku-cli')
       const script = spawnSyncStub.args[0][1].at(-1)
       expect(script).to.include('-2147023728')
-      const missingCatchPattern = /if \(\$_\.Exception\.HResult -eq \$missingCredentialHResult\) {\s*\[Console]::Error\.WriteLine\(\$missingCredentialSentinel\)\s*exit \$missingCredentialExitCode/g
+      expect(script).to.include('function Test-HerokuMissingCredential([Exception] $Exception)')
+      expect(script).to.include('$Exception = $Exception.InnerException')
+      const missingCatchPattern = /if \(Test-HerokuMissingCredential \$_\.Exception\) {\s*\[Console]::Error\.WriteLine\(\$missingCredentialSentinel\)\s*exit \$missingCredentialExitCode/g
       expect([...script.matchAll(missingCatchPattern)]).to.have.length(2)
       expect([...script.matchAll(/\[Console]::Error\.WriteLine\(\$missingCredentialSentinel\)/g)]).to.have.length(2)
       expect(script).to.match(/else\s*{\s*throw\s*}/)
@@ -298,7 +300,7 @@ describe('WindowsHandler', function () {
       handler.saveAuth({account: 'test@example.com', service: 'heroku-cli', token: 'mytoken'})
       const script = spawnSyncStub.args[0][1].at(-1)
       expect(script).to.include("'save' {")
-      expect(script).to.include('if ($_.Exception.HResult -ne $missingCredentialHResult) { throw }')
+      expect(script).to.include('if (-not (Test-HerokuMissingCredential $_.Exception)) { throw }')
     })
 
     it('scrubs raw and transported secrets from errors', function () {

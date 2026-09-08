@@ -23,6 +23,15 @@ function ConvertTo-HerokuBase64([string] $Value) {
   return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Value))
 }
 
+function Test-HerokuMissingCredential([Exception] $Exception) {
+  while ($null -ne $Exception) {
+    if ($Exception.HResult -eq $missingCredentialHResult) { return $true }
+    $Exception = $Exception.InnerException
+  }
+
+  return $false
+}
+
 $operation = $env:HEROKU_CREDENTIAL_OPERATION
 $service = ConvertFrom-HerokuBase64 $env:HEROKU_CREDENTIAL_SERVICE
 $account = ConvertFrom-HerokuBase64 $env:HEROKU_CREDENTIAL_ACCOUNT
@@ -38,7 +47,7 @@ switch ($operation) {
     try {
       $credentials = $vault.FindAllByResource($service)
     } catch {
-      if ($_.Exception.HResult -eq $missingCredentialHResult) {
+      if (Test-HerokuMissingCredential $_.Exception) {
         [Console]::Error.WriteLine($missingCredentialSentinel)
         exit $missingCredentialExitCode
       } else {
@@ -51,7 +60,7 @@ switch ($operation) {
     try {
       $credential = $vault.Retrieve($service, $account)
     } catch {
-      if ($_.Exception.HResult -eq $missingCredentialHResult) {
+      if (Test-HerokuMissingCredential $_.Exception) {
         [Console]::Error.WriteLine($missingCredentialSentinel)
         exit $missingCredentialExitCode
       } else {
@@ -65,7 +74,7 @@ switch ($operation) {
       $credential = $vault.Retrieve($service, $account)
       $vault.Remove($credential)
     } catch {
-      if ($_.Exception.HResult -ne $missingCredentialHResult) { throw }
+      if (-not (Test-HerokuMissingCredential $_.Exception)) { throw }
     }
     $tokenBase64 = [Console]::In.ReadToEnd()
     $token = ConvertFrom-HerokuBase64 $tokenBase64

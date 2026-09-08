@@ -78,6 +78,10 @@ export function assertNativeAcceptanceEnvironment(): string {
     }
   }
 
+  if (process.platform === 'darwin' && process.env.CFFIXED_USER_HOME !== resolvedRoot) {
+    throw new Error('CFFIXED_USER_HOME must equal the isolated acceptance home on macOS.')
+  }
+
   const parsedRoot = path.parse(resolvedRoot).root
   const expectedHomeDrive = process.platform === 'win32' ? parsedRoot.replace(/[/\\]$/, '') : parsedRoot
   const expectedHomePath = resolvedRoot.slice(expectedHomeDrive.length) || path.sep

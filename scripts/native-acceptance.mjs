@@ -16,6 +16,7 @@ const environment = {
   CI: 'true',
   NATIVE_CREDENTIAL_ACCEPTANCE: 'true',
   CREDENTIAL_ACCEPTANCE_TEMP_ROOT: tempRoot,
+  ...(process.platform === 'darwin' ? {CFFIXED_USER_HOME: tempRoot} : {}),
   HOME: tempRoot,
   USERPROFILE: tempRoot,
   HOMEDRIVE: process.platform === 'win32' ? parsedRoot.replace(/[/\\]$/, '') : parsedRoot,

@@ -24,6 +24,7 @@ describe('acceptance utils', function () {
     process.env.CREDENTIAL_ACCEPTANCE_TEMP_ROOT = tempRoot
     process.env.HOME = tempRoot
     process.env.USERPROFILE = tempRoot
+    if (process.platform === 'darwin') process.env.CFFIXED_USER_HOME = tempRoot
     const parsedRoot = path.parse(tempRoot).root
     process.env.HOMEDRIVE = process.platform === 'win32' ? parsedRoot.replace(/[/\\]$/, '') : parsedRoot
     process.env.HOMEPATH = tempRoot.slice(process.env.HOMEDRIVE.length) || path.sep
@@ -97,6 +98,14 @@ describe('acceptance utils', function () {
     process.env.USERPROFILE = path.join(tempParent, 'not-the-acceptance-home')
 
     assert.throws(assertNativeAcceptanceEnvironment, /USERPROFILE must equal the isolated acceptance home/)
+  })
+
+  it('refuses a mismatched CoreFoundation home on macOS', function () {
+    if (process.platform !== 'darwin') this.skip()
+
+    process.env.CFFIXED_USER_HOME = path.join(tempParent, 'not-the-acceptance-home')
+
+    assert.throws(assertNativeAcceptanceEnvironment, /CFFIXED_USER_HOME must equal the isolated acceptance home/)
   })
 
   it('refuses a missing HOMEDRIVE', function () {

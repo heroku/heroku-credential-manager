@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import sinon from 'sinon'
 
 import {WindowsHandler} from '../../src/credential-handlers/windows-handler.js'
+import {NativeCredentialNotFoundError} from '../../src/native-credential-not-found-error.js'
 
 const encode = (value: string): string => Buffer.from(value, 'utf8').toString('base64')
 const missingCredentialSentinel = 'HEROKU_CREDENTIAL_NOT_FOUND'
@@ -116,16 +117,46 @@ describe('WindowsHandler', function () {
       expect(handler.getAuth('test@example.com', 'heroku-cli')).to.equal('my-sécret-token\nwith-newline')
     })
 
-    it('throws an error when token is empty', function () {
+    it('throws a typed missing-credential error when token is empty', function () {
       spawnSyncStub.returns({status: 0, stderr: '', stdout: ''})
 
-      expect(() => handler.getAuth('test@example.com', 'heroku-cli')).to.throw('Failed to retrieve token from Windows Credential Manager: Token not found')
+      expect(() => handler.getAuth('test@example.com', 'heroku-cli'))
+        .to.throw(NativeCredentialNotFoundError, 'Failed to retrieve token from Windows Credential Manager: Token not found')
+    })
+
+    it('throws a typed missing-credential error for the exact sentinel protocol', function () {
+      spawnSyncStub.returns({status: 3, stderr: `${missingCredentialSentinel}\r\n`, stdout: ''})
+
+      expect(() => handler.getAuth('test@example.com', 'heroku-cli'))
+        .to.throw(NativeCredentialNotFoundError, `Failed to retrieve token from Windows Credential Manager: ${missingCredentialSentinel}`)
     })
 
     it('throws a compatible error when retrieval fails', function () {
       spawnSyncStub.returns({status: 1, stderr: 'Permission denied', stdout: ''})
 
       expect(() => handler.getAuth('test@example.com', 'heroku-cli')).to.throw('Failed to retrieve token from Windows Credential Manager: Permission denied')
+    })
+
+    it('keeps malformed or process-level sentinel failures ordinary', function () {
+      const results = [
+        {status: 3, stderr: ` ${missingCredentialSentinel}`, stdout: ''},
+        {
+          error: new Error('spawn powershell.exe EACCES'), status: 3, stderr: missingCredentialSentinel, stdout: '',
+        },
+        {
+          signal: 'SIGTERM', status: 3, stderr: missingCredentialSentinel, stdout: '',
+        },
+      ]
+
+      for (const result of results) {
+        spawnSyncStub.returns(result)
+        try {
+          handler.getAuth('test@example.com', 'heroku-cli')
+          expect.fail('Should have thrown an error')
+        } catch (error) {
+          expect(error).to.be.instanceOf(Error).and.not.be.instanceOf(NativeCredentialNotFoundError)
+        }
+      }
     })
   })
 
@@ -216,8 +247,8 @@ describe('WindowsHandler', function () {
       expect(script).to.include('function Test-HerokuMissingCredential([Exception] $Exception)')
       expect(script).to.include('$Exception = $Exception.InnerException')
       const missingCatchPattern = /if \(Test-HerokuMissingCredential \$_\.Exception\) {\s*\[Console]::Error\.WriteLine\(\$missingCredentialSentinel\)\s*exit \$missingCredentialExitCode/g
-      expect([...script.matchAll(missingCatchPattern)]).to.have.length(2)
-      expect([...script.matchAll(/\[Console]::Error\.WriteLine\(\$missingCredentialSentinel\)/g)]).to.have.length(2)
+      expect([...script.matchAll(missingCatchPattern)]).to.have.length(3)
+      expect([...script.matchAll(/\[Console]::Error\.WriteLine\(\$missingCredentialSentinel\)/g)]).to.have.length(3)
       expect(script).to.match(/else\s*{\s*throw\s*}/)
     })
   })

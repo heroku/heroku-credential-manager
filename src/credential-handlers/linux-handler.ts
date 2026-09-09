@@ -3,6 +3,8 @@ import childProcess from 'node:child_process'
 
 import type {KeychainAuthEntry} from '../lib/types.js'
 
+import {NativeCredentialNotFoundError} from '../native-credential-not-found-error.js'
+
 class InvalidCredentialValueError extends Error {}
 
 interface SecretToolResult {
@@ -10,6 +12,7 @@ interface SecretToolResult {
   signal?: NodeJS.Signals | null
   status: null | number
   stderr?: Buffer | null | string
+  stdout?: Buffer | null | string
 }
 
 /**
@@ -28,7 +31,7 @@ export class LinuxHandler {
    * @param account - The account login to use (e.g. 'test@example.com')
    * @param service - The service name to use
    * @returns The stored authentication token.
-   * @throws Error if the token is not found or retrieval fails.
+   * @throws NativeCredentialNotFoundError if the token is not found; Error if retrieval fails.
    */
   public getAuth(account: string, service: string): string {
     try {
@@ -41,12 +44,16 @@ export class LinuxHandler {
         {encoding: 'utf8'},
       )
 
+      if (this.isMissingSecretLookupFailure(spawnResult)) {
+        throw new NativeCredentialNotFoundError('exit 1')
+      }
+
       this.throwOnFailure(spawnResult, status => `exit ${status ?? -1}`)
 
       const token = spawnResult.stdout.trim()
 
       if (!token) {
-        throw new Error('Token not found')
+        throw new NativeCredentialNotFoundError('Token not found')
       }
 
       return token
@@ -56,7 +63,12 @@ export class LinuxHandler {
         throw new TypeError(`Failed to retrieve token from Linux keyring: ${message}`)
       }
 
-      throw new Error(`Failed to retrieve token from Linux keyring: ${this.scrubError(message, [account, service])}`)
+      const diagnostic = `Failed to retrieve token from Linux keyring: ${this.scrubError(message, [account, service])}`
+      if (error instanceof NativeCredentialNotFoundError) {
+        throw new NativeCredentialNotFoundError(diagnostic)
+      }
+
+      throw new Error(diagnostic)
     }
   }
 
@@ -192,6 +204,14 @@ export class LinuxHandler {
     return !result.error
       && !result.signal
       && result.status === 1
+      && (result.stderr ?? '').toString() === ''
+  }
+
+  private isMissingSecretLookupFailure(result: SecretToolResult): boolean {
+    return !result.error
+      && !result.signal
+      && result.status === 1
+      && (result.stdout ?? '').toString() === ''
       && (result.stderr ?? '').toString() === ''
   }
 

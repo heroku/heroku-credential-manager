@@ -9,6 +9,7 @@ import {NetrcHandler} from '../src/credential-handlers/netrc-handler.js'
 import {WindowsHandler} from '../src/credential-handlers/windows-handler.js'
 import * as credentialManager from '../src/index.js'
 import {CredentialStore} from '../src/lib/credential-storage-selector.js'
+import {NativeCredentialNotFoundError} from '../src/native-credential-not-found-error.js'
 
 use(chaiAsPromised)
 
@@ -31,6 +32,7 @@ describe('credential-manager', function () {
     it('should save to credential store only', async function () {
       const macosStub = sinon.stub(MacOSHandler.prototype, 'saveAuth')
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').resolves()
+      const cleanupStub = sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').resolves()
 
       await credentialManager.saveAuth('user@example.com', 'test-token', ['api.heroku.com'])
 
@@ -41,16 +43,19 @@ describe('credential-manager', function () {
         token: 'test-token',
       })
       expect(netrcStub.notCalled).to.be.true
+      expect(cleanupStub.calledOnceWith(['api.heroku.com'], 'user@example.com')).to.be.true
     })
 
     it('preserves native save success when no fallback hosts are provided', async function () {
       const macosStub = sinon.stub(MacOSHandler.prototype, 'saveAuth')
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').resolves()
+      const cleanupStub = sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').resolves()
 
       await credentialManager.saveAuth('user@example.com', 'test-token', [])
 
       expect(macosStub.calledOnce).to.be.true
       expect(netrcStub.notCalled).to.be.true
+      expect(cleanupStub.notCalled).to.be.true
     })
 
     it('throws an actionable error when native save fails without a fallback host', async function () {
@@ -73,11 +78,13 @@ describe('credential-manager', function () {
       process.env.HEROKU_NETRC_WRITE = 'TRUE'
       const macosStub = sinon.stub(MacOSHandler.prototype, 'saveAuth')
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').resolves()
+      const cleanupStub = sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').resolves()
 
       await credentialManager.saveAuth('user@example.com', 'test-token', ['api.heroku.com'])
 
       expect(macosStub.notCalled).to.be.true
       expect(netrcStub.calledOnce).to.be.true
+      expect(cleanupStub.notCalled).to.be.true
     })
 
     it('throws before claiming success when forced-netrc mode has no hosts', async function () {
@@ -101,11 +108,13 @@ describe('credential-manager', function () {
     it('should fall back to netrc if credential store fails', async function () {
       const macosStub = sinon.stub(MacOSHandler.prototype, 'saveAuth').throws(new Error('Keychain error'))
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').resolves()
+      const cleanupStub = sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').resolves()
 
       await credentialManager.saveAuth('user@example.com', 'test-token', ['api.heroku.com'])
 
       expect(macosStub.calledOnce).to.be.true
       expect(netrcStub.calledOnce).to.be.true
+      expect(cleanupStub.notCalled).to.be.true
     })
 
     it('should batch all hosts into one netrc save on fallback', async function () {
@@ -156,6 +165,7 @@ describe('credential-manager', function () {
     it('should save to credential store with custom service name', async function () {
       const macosStub = sinon.stub(MacOSHandler.prototype, 'saveAuth')
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').resolves()
+      sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').resolves()
 
       await credentialManager.saveAuth('user@example.com', 'test-token', ['api.heroku.com'], 'custom-service')
 
@@ -164,6 +174,17 @@ describe('credential-manager', function () {
         service: 'custom-service',
         token: 'test-token',
       })
+      expect(netrcStub.notCalled).to.be.true
+    })
+
+    it('should reject when stale netrc cleanup fails after a native save', async function () {
+      const macosStub = sinon.stub(MacOSHandler.prototype, 'saveAuth')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').resolves()
+      sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').rejects(new Error('Netrc cleanup error'))
+
+      await expect(credentialManager.saveAuth('user@example.com', 'test-token', ['api.heroku.com']))
+        .to.be.rejectedWith(Error, 'Netrc cleanup error')
+      expect(macosStub.calledOnce).to.be.true
       expect(netrcStub.notCalled).to.be.true
     })
   })
@@ -195,17 +216,26 @@ describe('credential-manager', function () {
       expect(auth).to.deep.equal({account: 'user@example.com', token: 'netrc-token'})
     })
 
-    it('returns the account stored for the host when it differs from the native account hint', async function () {
-      sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new Error('Not found'))
+    it('rejects a mismatched account in forced-netrc mode', async function () {
+      process.env.HEROKU_NETRC_WRITE = 'TRUE'
+      const macosStub = sinon.stub(MacOSHandler.prototype, 'getAuth')
       sinon.stub(NetrcHandler.prototype, 'getAuth').resolves({login: 'stored@example.com', password: 'stored-token'})
 
-      const auth = await credentialManager.getAuth('hint@example.com', 'api.heroku.com')
-
-      expect(auth).to.deep.equal({account: 'stored@example.com', token: 'stored-token'})
+      await expect(credentialManager.getAuth('requested@example.com', 'api.heroku.com'))
+        .to.be.rejectedWith(Error, 'Netrc credential does not match the requested account for host')
+      expect(macosStub.notCalled).to.be.true
     })
 
-    it('should fall back to netrc if credential store fails', async function () {
-      const macosStub = sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new Error('Keychain error'))
+    it('rejects a netrc account that differs from the requested account', async function () {
+      sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new NativeCredentialNotFoundError('Not found'))
+      sinon.stub(NetrcHandler.prototype, 'getAuth').resolves({login: 'stored@example.com', password: 'stored-token'})
+
+      await expect(credentialManager.getAuth('requested@example.com', 'api.heroku.com'))
+        .to.be.rejectedWith(Error, 'Netrc credential does not match the requested account for host')
+    })
+
+    it('should fall back to netrc if the native credential is missing', async function () {
+      const macosStub = sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new NativeCredentialNotFoundError('Not found'))
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'getAuth')
       netrcStub.resolves({login: 'user@example.com', password: 'netrc-token'})
 
@@ -217,8 +247,18 @@ describe('credential-manager', function () {
       expect(auth).to.deep.equal({account: 'user@example.com', token: 'netrc-token'})
     })
 
+    it('should surface native backend errors without reading netrc', async function () {
+      const error = new Error('Keychain unavailable')
+      sinon.stub(MacOSHandler.prototype, 'getAuth').throws(error)
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'getAuth')
+
+      await expect(credentialManager.getAuth('user@example.com', 'api.heroku.com'))
+        .to.be.rejectedWith(Error, 'Keychain unavailable')
+      expect(netrcStub.notCalled).to.be.true
+    })
+
     it('should throw error when credentials are not found in either location', async function () {
-      const macosStub = sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new Error('Not found'))
+      const macosStub = sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new NativeCredentialNotFoundError('Not found'))
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'getAuth')
       netrcStub.rejects(new Error('No auth found for api.heroku.com'))
 
@@ -229,7 +269,7 @@ describe('credential-manager', function () {
     })
 
     it('should throw error when netrc password is empty', async function () {
-      const macosStub = sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new Error('Not found'))
+      const macosStub = sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new NativeCredentialNotFoundError('Not found'))
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'getAuth')
       netrcStub.resolves({login: 'user@example.com', password: undefined})
 
@@ -240,7 +280,7 @@ describe('credential-manager', function () {
     })
 
     it('should throw error when netrc login is empty', async function () {
-      sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new Error('Not found'))
+      sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new NativeCredentialNotFoundError('Not found'))
       sinon.stub(NetrcHandler.prototype, 'getAuth').resolves({login: undefined, password: 'netrc-token'})
 
       await expect(credentialManager.getAuth('user@example.com', 'api.heroku.com'))
@@ -392,5 +432,13 @@ describe('credential-manager', function () {
       handler = credentialManager.getCredentialHandler(CredentialStore.LinuxSecretService)
       expect(handler).to.be.instanceOf(LinuxHandler)
     })
+  })
+
+  it('exports NativeCredentialNotFoundError from the package root', function () {
+    const error = new credentialManager.NativeCredentialNotFoundError('Token not found')
+
+    expect(error).to.be.instanceOf(Error)
+    expect(error.name).to.equal('NativeCredentialNotFoundError')
+    expect(error.message).to.equal('Token not found')
   })
 })

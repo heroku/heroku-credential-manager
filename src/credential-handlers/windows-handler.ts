@@ -2,6 +2,8 @@ import childProcess from 'node:child_process'
 
 import type {KeychainAuthEntry} from '../lib/types.js'
 
+import {NativeCredentialNotFoundError} from '../native-credential-not-found-error.js'
+
 const missingCredentialExitCode = 3
 const missingCredentialSentinel = 'HEROKU_CREDENTIAL_NOT_FOUND'
 
@@ -39,7 +41,16 @@ $vault = New-Object Windows.Security.Credentials.PasswordVault
 
 switch ($operation) {
   'get' {
-    $credential = $vault.Retrieve($service, $account)
+    try {
+      $credential = $vault.Retrieve($service, $account)
+    } catch {
+      if (Test-HerokuMissingCredential $_.Exception) {
+        [Console]::Error.WriteLine($missingCredentialSentinel)
+        exit $missingCredentialExitCode
+      } else {
+        throw
+      }
+    }
     $credential.RetrievePassword()
     ConvertTo-HerokuBase64 $credential.Password
   }
@@ -105,21 +116,30 @@ export class WindowsHandler {
    * @param account - The account login to use (e.g. 'test@example.com')
    * @param service - The service name to use
    * @returns The stored authentication token.
-   * @throws Error if the token is not found or retrieval fails.
+   * @throws NativeCredentialNotFoundError if the token is not found; Error if retrieval fails.
    */
   public getAuth(account: string, service: string): string {
     try {
       const result = this.invokePowerShell('get', service, account)
+      if (this.isMissingCredential(result)) {
+        throw new NativeCredentialNotFoundError(this.outputText(result.stderr).trim())
+      }
+
       this.throwOnFailure(result)
       const token = this.decodeValue(this.outputText(result.stdout).trim())
 
       if (!token) {
-        throw new Error('Token not found')
+        throw new NativeCredentialNotFoundError('Token not found')
       }
 
       return token
     } catch (error) {
-      throw new Error(`Failed to retrieve token from Windows Credential Manager: ${this.scrubError(error, [account, service])}`)
+      const diagnostic = `Failed to retrieve token from Windows Credential Manager: ${this.scrubError(error, [account, service])}`
+      if (error instanceof NativeCredentialNotFoundError) {
+        throw new NativeCredentialNotFoundError(diagnostic)
+      }
+
+      throw new Error(diagnostic)
     }
   }
 

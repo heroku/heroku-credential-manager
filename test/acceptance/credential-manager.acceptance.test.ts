@@ -194,6 +194,8 @@ describe('credential manager Phase 1 acceptance', function () {
       delete process.env.HEROKU_NETRC_WRITE
       trackNative(fixture)
       await safeSave(fixture)
+      assert.equal((await loadIsolatedNetrc())[fixture.hosts[0]], undefined)
+      assert.deepEqual(await safeGet(fixture.account, fixture.hosts[0], fixture.service), expectedAuth(fixture))
       await safeRemove(fixture.account, fixture.hosts, fixture.service)
 
       assert.equal((await credentialManager.listKeychainAccounts(fixture.service)).includes(fixture.account), false)
@@ -201,7 +203,7 @@ describe('credential manager Phase 1 acceptance', function () {
       await assert.rejects(safeGet(fixture.account, fixture.hosts[0], fixture.service), /No auth found|No credentials found/)
     })
 
-    it('falls back to isolated netrc while native storage and cleanup remain shadowed', async function () {
+    it('writes isolated netrc when native save fails and surfaces later backend errors', async function () {
       const fixture = fixtures.multipleHosts
       fakeCredentialStore = setupFakeCredentialStore()
 
@@ -213,12 +215,21 @@ describe('credential manager Phase 1 acceptance', function () {
         assert.equal(savedMachines[host]?.password, fixture.token)
       }
 
-      assert.deepEqual(await safeGet(fixture.account, fixture.hosts[0], fixture.service), expectedAuth(fixture))
+      await assert.rejects(safeGet(fixture.account, fixture.hosts[0], fixture.service), /Failed to retrieve token/)
 
       await safeRemove(fixture.account, fixture.hosts, fixture.service)
       fakeCredentialStore.assertShadowed()
       const machines = await loadIsolatedNetrc()
       for (const host of fixture.hosts) assert.equal(machines[host], undefined)
+    })
+
+    it('reads a matching netrc credential after a genuine native miss', async function () {
+      const fixture = fixtures.multipleHosts
+      process.env.HEROKU_NETRC_WRITE = 'true'
+      await safeSave(fixture)
+
+      delete process.env.HEROKU_NETRC_WRITE
+      assert.deepEqual(await safeGet(fixture.account, fixture.hosts[0], fixture.service), expectedAuth(fixture))
     })
 
     it('reports credentials missing from both native storage and netrc', async function () {

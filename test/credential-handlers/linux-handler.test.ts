@@ -3,6 +3,7 @@ import childProcess from 'node:child_process'
 import sinon from 'sinon'
 
 import {LinuxHandler} from '../../src/credential-handlers/linux-handler.js'
+import {NativeCredentialNotFoundError} from '../../src/native-credential-not-found-error.js'
 
 describe('LinuxHandler', function () {
   let execSyncStub: sinon.SinonStub
@@ -50,11 +51,20 @@ describe('LinuxHandler', function () {
       expect(token).to.equal('my-secret-token')
     })
 
-    it('should throw an error when token is empty', function () {
+    it('should throw a typed missing-credential error when token is empty', function () {
       spawnSyncStub.returns({
         error: undefined, status: 0, stderr: '', stdout: '',
       })
-      expect(() => handler.getAuth('test@example.com', 'heroku-cli')).to.throw('Failed to retrieve token from Linux keyring: Token not found')
+      expect(() => handler.getAuth('test@example.com', 'heroku-cli'))
+        .to.throw(NativeCredentialNotFoundError, 'Failed to retrieve token from Linux keyring: Token not found')
+    })
+
+    it('should throw a typed missing-credential error for an exact empty status 1 result', function () {
+      spawnSyncStub.returns({
+        error: undefined, status: 1, stderr: '', stdout: '',
+      })
+      expect(() => handler.getAuth('test@example.com', 'heroku-cli'))
+        .to.throw(NativeCredentialNotFoundError, 'Failed to retrieve token from Linux keyring: exit 1')
     })
 
     it('should throw an error when retrieval fails', function () {
@@ -69,6 +79,33 @@ describe('LinuxHandler', function () {
         error: new Error('ENOENT: secret-tool command not found'), status: null, stderr: '', stdout: '',
       })
       expect(() => handler.getAuth('test@example.com', 'heroku-cli')).to.throw('Failed to retrieve token from Linux keyring: ENOENT: secret-tool command not found')
+    })
+
+    it('should keep non-exact and process-level status 1 failures ordinary', function () {
+      const results = [
+        {
+          error: undefined, status: 1, stderr: '', stdout: ' ',
+        },
+        {
+          error: undefined, status: 1, stderr: ' ', stdout: '',
+        },
+        {
+          error: new Error('spawn secret-tool EACCES'), status: 1, stderr: '', stdout: '',
+        },
+        {
+          error: undefined, signal: 'SIGTERM', status: 1, stderr: '', stdout: '',
+        },
+      ]
+
+      for (const result of results) {
+        spawnSyncStub.returns(result)
+        try {
+          handler.getAuth('test@example.com', 'heroku-cli')
+          expect.fail('Should have thrown an error')
+        } catch (error) {
+          expect(error).to.be.instanceOf(Error).and.not.be.instanceOf(NativeCredentialNotFoundError)
+        }
+      }
     })
 
     it('should scrub account and service from retrieval diagnostics', function () {

@@ -41,7 +41,33 @@ const auth = await getAuth('user@example.com', 'api.heroku.com')
 await removeAuth('user@example.com', ['api.heroku.com'])
 ```
 
-`saveAuth(account, token, hosts, service?)` stores the credential. `getAuth(account, host, service?)` returns the stored account and token; pass `undefined` for the account to read the host from `.netrc`. `removeAuth(account, hosts, service?)` removes the requested credential. The optional service defaults to `heroku-cli`.
+`saveAuth(account, token, hosts, service?)` stores the credential. `getAuth(account, host, service?)` returns the stored account and token; pass `undefined` for the account to read the host from `.netrc`. When an account is provided, a native miss falls back only to a matching `.netrc` login; native backend errors are surfaced. `removeAuth(account, hosts, service?)` removes the requested credential. The optional service defaults to `heroku-cli`.
+
+### Storage behavior
+
+On non-Windows platforms, `.netrc` writes open the netrc path with `O_NOFOLLOW` and refuse a symbolic link at that path. Reads through a symbolic link remain supported, and a rejected write leaves the link target unchanged. Dotfile-manager setups that symlink `.netrc` must use a regular file at the netrc path for operations that write it.
+
+A successful native credential-store save removes matching stale `.netrc` entries for the supplied hosts. Entries belonging to another login are preserved.
+
+Native backend errors are surfaced rather than hidden by `.netrc` fallback. Only a confirmed missing native credential falls back to `.netrc`.
+
+The native handlers throw `NativeCredentialNotFoundError` for a confirmed missing credential. Consumers calling a handler directly can distinguish that result from an unavailable or degraded backend:
+
+```typescript
+import {NativeCredentialNotFoundError} from '@heroku/heroku-credential-manager'
+
+try {
+  handler.getAuth('user@example.com', 'heroku-cli')
+} catch (error) {
+  if (error instanceof NativeCredentialNotFoundError) {
+    // The native credential does not exist.
+  } else {
+    throw error
+  }
+}
+```
+
+Top-level `removeAuth` removes the supplied `.netrc` hosts regardless of their stored login so logout can clean credentials after storage-mode changes.
 
 ## Development
 

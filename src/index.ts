@@ -7,6 +7,7 @@ import {MacOSHandler} from './credential-handlers/macos-handler.js'
 import {NetrcHandler} from './credential-handlers/netrc-handler.js'
 import {WindowsHandler} from './credential-handlers/windows-handler.js'
 import {CredentialStore, getNativeCredentialStore, getStorageConfig} from './lib/credential-storage-selector.js'
+import {NativeCredentialNotFoundError} from './native-credential-not-found-error.js'
 
 const credDebug = debug('heroku-credential-manager')
 
@@ -43,13 +44,15 @@ export async function saveAuth(account: string, token: string, hosts: string[], 
       password: token,
     }
     await netrcHandler.saveAuthForHosts(netrcAuth, hosts)
+  } else if (hosts.length > 0) {
+    await netrcHandler.removeAuthForHosts(hosts, account)
   }
 }
 
 /**
  * Retrieves authentication credentials from the native credential store (if available) or .netrc file.
  *
- * @param account - User's account hint for native storage, or undefined to read the requested host directly from netrc
+ * @param account - User's account, or undefined to read the requested host directly from netrc
  * @param host - Hostname for netrc lookup (e.g., 'api.heroku.com')
  * @param service - Service name (defaults to 'heroku-cli')
  * @returns Promise that resolves with the authentication account and token.
@@ -64,14 +67,19 @@ export async function getAuth(account: string | undefined, host: string, service
       const handler = getCredentialHandler(config.credentialStore)
       const token = handler.getAuth(account, service)
       return {account, token}
-    } catch {
-      credDebug('native credential store failed during getAuth; falling back to netrc')
+    } catch (error) {
+      if (!(error instanceof NativeCredentialNotFoundError)) throw error
+      credDebug('native credential was not found during getAuth; falling back to netrc')
     }
   }
 
   const auth = await netrcHandler.getAuth(host)
 
   if (auth.login && auth.password) {
+    if (account && auth.login !== account) {
+      throw new Error('Netrc credential does not match the requested account for host')
+    }
+
     return {account: auth.login, token: auth.password}
   }
 
@@ -163,3 +171,4 @@ export type {
   Token,
 } from './lib/netrc-parser.js'
 export type {AuthEntry, KeychainAuthEntry, NetrcAuthEntry} from './lib/types.js'
+export {NativeCredentialNotFoundError} from './native-credential-not-found-error.js'

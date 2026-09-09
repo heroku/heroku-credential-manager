@@ -3,7 +3,7 @@ import chaiAsPromised from 'chai-as-promised'
 import fs from 'fs-extra'
 import {resolve} from 'node:path'
 
-import type {MachineToken} from '../../src/lib/netrc-parser.js'
+import {type MachineToken, parse} from '../../src/lib/netrc-parser.js'
 
 use(chaiAsPromised)
 
@@ -122,29 +122,85 @@ describe('NetrcHandler', function () {
       })
     }
 
-    it('removeAuthForHosts removes multiple hosts with a single save', async function () {
+    it('removeAuthForHosts removes only supplied hosts with an exactly matching login using one load and save', async function () {
       let loadCalls = 0
       let saveCalls = 0
       const handler = new NetrcHandler(netrcPath)
-      await handler.saveAuthForHosts({login: 'u@e.com', password: 'tok'}, ['api.heroku.com', 'git.heroku.com'])
-
-      const origSave = handler.netrc.save.bind(handler.netrc)
-      const origLoad = handler.netrc.load.bind(handler.netrc)
       handler.netrc.load = async () => {
         loadCalls++
-        return origLoad()
+        handler.netrc.machines = parse(`machine api.heroku.com login u@e.com password api-token
+machine git.heroku.com login u@e.com password git-token
+machine other.heroku.com login other@e.com password other-token
+machine unsupplied.heroku.com login u@e.com password unsupplied-token
+`)
       }
 
       handler.netrc.save = async () => {
         saveCalls++
-        return origSave()
       }
 
-      await handler.removeAuthForHosts(['api.heroku.com', 'git.heroku.com'])
+      await handler.removeAuthForHosts(['api.heroku.com', 'git.heroku.com', 'other.heroku.com', 'api.heroku.com'], 'u@e.com')
       expect(loadCalls).to.equal(1)
       expect(saveCalls).to.equal(1)
       expect(handler.netrc.machines['api.heroku.com']).to.be.undefined
       expect(handler.netrc.machines['git.heroku.com']).to.be.undefined
+      expect(handler.netrc.machines['other.heroku.com'].login).to.equal('other@e.com')
+      expect(handler.netrc.machines['unsupplied.heroku.com'].login).to.equal('u@e.com')
+    })
+
+    it('removeAuthForHosts preserves entries with different or missing logins without saving', async function () {
+      let loadCalls = 0
+      let saveCalls = 0
+      const handler = new NetrcHandler(netrcPath)
+      handler.netrc.load = async () => {
+        loadCalls++
+        handler.netrc.machines = parse(`machine different.heroku.com login other@e.com password other-token
+machine case.heroku.com login U@E.COM password case-token
+machine missing.heroku.com password missing-login-token
+`)
+      }
+
+      handler.netrc.save = async () => {
+        saveCalls++
+      }
+
+      await handler.removeAuthForHosts(['different.heroku.com', 'case.heroku.com', 'missing.heroku.com', 'absent.heroku.com'], 'u@e.com')
+      expect(loadCalls).to.equal(1)
+      expect(saveCalls).to.equal(0)
+      expect(handler.netrc.machines['different.heroku.com'].login).to.equal('other@e.com')
+      expect(handler.netrc.machines['case.heroku.com'].login).to.equal('U@E.COM')
+      expect(handler.netrc.machines['missing.heroku.com'].login).to.be.undefined
+    })
+
+    for (const hosts of [[''], ['   '], ['a.com', 'bad host'], ['bad\0host']]) {
+      it(`removeAuthForHosts rejects invalid hosts ${JSON.stringify(hosts)} before loading netrc`, async function () {
+        let loadCalls = 0
+        const handler = new NetrcHandler(netrcPath)
+        handler.netrc.load = async () => {
+          loadCalls++
+        }
+
+        await expect(handler.removeAuthForHosts(hosts, 'u@e.com'))
+          .to.be.rejectedWith(Error, 'Cannot remove credentials from netrc: provide at least one valid, non-empty host')
+        expect(loadCalls).to.equal(0)
+      })
+    }
+
+    it('removeAuthForHosts does not load or save for an empty host list', async function () {
+      let loadCalls = 0
+      let saveCalls = 0
+      const handler = new NetrcHandler(netrcPath)
+      handler.netrc.load = async () => {
+        loadCalls++
+      }
+
+      handler.netrc.save = async () => {
+        saveCalls++
+      }
+
+      await handler.removeAuthForHosts([], 'u@e.com')
+      expect(loadCalls).to.equal(0)
+      expect(saveCalls).to.equal(0)
     })
   })
 })

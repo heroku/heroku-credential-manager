@@ -32,23 +32,28 @@ export class NetrcHandler {
   /**
    * Removes authentication credentials for a given host.
    * @param host - The hostname to remove credentials for.
+   * @param account - Optional login that existing credentials must exactly match.
    * @returns A promise that resolves when removal is complete.
    */
-  public async removeAuth(host: string) {
-    await this.removeAuthForHosts([host])
+  public async removeAuth(host: string, account?: string) {
+    await this.removeAuthForHosts([host], account)
   }
 
   /**
    * Removes credentials for multiple hosts with a single netrc load/save.
+   * Only entries with an exactly matching login are removed when account is defined.
    * @param hosts - The hostnames to remove credentials for.
+   * @param account - Optional login that existing credentials must exactly match.
    * @returns A promise that resolves when removal is complete.
    */
-  public async removeAuthForHosts(hosts: string[]) {
+  public async removeAuthForHosts(hosts: string[], account?: string) {
     if (hosts.length === 0) return
+    this.validateHosts(hosts, 'remove')
     await this.netrc.load()
     let changed = false
     for (const host of hosts) {
-      if (!this.netrc.machines[host]) {
+      const machine = this.netrc.machines[host]
+      if (!machine || (account !== undefined && machine.login !== account)) {
         credDebug(`No credentials to logout for ${host}`)
         continue
       }
@@ -77,9 +82,7 @@ export class NetrcHandler {
    * @returns A promise that resolves when the credentials are saved.
    */
   public async saveAuthForHosts(auth: NetrcAuthEntry, hosts: string[]) {
-    if (hosts.length === 0 || hosts.some(host => typeof host !== 'string' || host.length === 0 || /[\s\0]/.test(host))) {
-      throw new Error('Cannot save credentials to netrc: provide at least one valid, non-empty host')
-    }
+    this.validateHosts(hosts, 'save', true)
 
     await this.netrc.load()
     for (const host of hosts) {
@@ -104,6 +107,13 @@ export class NetrcHandler {
           token.internalWhitespace = '\n  '
         }
       }
+    }
+  }
+
+  private validateHosts(hosts: string[], operation: 'remove' | 'save', requireHost = false) {
+    if ((requireHost && hosts.length === 0) || hosts.some(host => typeof host !== 'string' || host.length === 0 || /[\s\0]/.test(host))) {
+      const preposition = operation === 'save' ? 'to' : 'from'
+      throw new Error(`Cannot ${operation} credentials ${preposition} netrc: provide at least one valid, non-empty host`)
     }
   }
 }

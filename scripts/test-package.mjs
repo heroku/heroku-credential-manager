@@ -156,14 +156,14 @@ try {
 
   fs.writeFileSync(path.join(consumerDirectory, 'type-imports.ts'), `
 import type {AuthEntry, KeychainAuthEntry, NetrcAuthEntry, StorageConfig} from '${packageName}'
-import {getAuth, removeAuth, saveAuth} from '${packageName}'
+import {getAuth, NativeCredentialNotFoundError, removeAuth, saveAuth} from '${packageName}'
 
 const auth: AuthEntry = {account: 'package-fixture@example.com', token: 'package-fixture-token'}
 const keychain: KeychainAuthEntry = {account: auth.account, service: 'package-fixture', token: auth.token}
 const netrc: NetrcAuthEntry = {login: keychain.account, password: keychain.token}
 const storage: StorageConfig = {credentialStore: null, useNetrc: true}
 
-void [auth, keychain, netrc, storage, getAuth, removeAuth, saveAuth]
+void [auth, keychain, netrc, storage, getAuth, NativeCredentialNotFoundError, removeAuth, saveAuth]
 `)
   fs.writeFileSync(path.join(consumerDirectory, 'tsconfig.json'), JSON.stringify({
     compilerOptions: {
@@ -188,7 +188,11 @@ import * as credentialManager from '${packageName}'
 
 assert.equal(typeof credentialManager.saveAuth, 'function')
 assert.equal(typeof credentialManager.getAuth, 'function')
+assert.equal(typeof credentialManager.NativeCredentialNotFoundError, 'function')
 assert.equal(typeof credentialManager.removeAuth, 'function')
+const missingCredentialError = new credentialManager.NativeCredentialNotFoundError('Token not found')
+assert.equal(missingCredentialError.name, 'NativeCredentialNotFoundError')
+assert.equal(missingCredentialError.message, 'Token not found')
 await assert.rejects(import('${packageName}/login'), error => error.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED')
 
 const temporaryRoot = ${JSON.stringify(temporaryRoot)}

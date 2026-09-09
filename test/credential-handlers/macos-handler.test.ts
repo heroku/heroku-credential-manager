@@ -3,6 +3,7 @@ import childProcess from 'node:child_process'
 import sinon from 'sinon'
 
 import {MacOSHandler} from '../../src/credential-handlers/macos-handler.js'
+import {NativeCredentialNotFoundError} from '../../src/native-credential-not-found-error.js'
 
 describe('MacOSHandler', function () {
   let execSyncStub: sinon.SinonStub
@@ -50,11 +51,20 @@ describe('MacOSHandler', function () {
       expect(token).to.equal('my-secret-token')
     })
 
-    it('should throw an error when token is empty', function () {
+    it('should throw a typed missing-credential error when token is empty', function () {
       spawnSyncStub.returns({
         error: undefined, status: 0, stderr: '', stdout: '',
       })
-      expect(() => handler.getAuth('test@example.com', 'heroku-cli')).to.throw('Failed to retrieve token from macOS Keychain: Token not found')
+      expect(() => handler.getAuth('test@example.com', 'heroku-cli'))
+        .to.throw(NativeCredentialNotFoundError, 'Failed to retrieve token from macOS Keychain: Token not found')
+    })
+
+    it('should throw a typed missing-credential error for clean exit 44', function () {
+      spawnSyncStub.returns({
+        error: undefined, status: 44, stderr: 'The specified item could not be found.', stdout: '',
+      })
+      expect(() => handler.getAuth('test@example.com', 'heroku-cli'))
+        .to.throw(NativeCredentialNotFoundError, 'Failed to retrieve token from macOS Keychain: The specified item could not be found.')
     })
 
     it('should throw an error when retrieval fails', function () {
@@ -69,6 +79,14 @@ describe('MacOSHandler', function () {
         error: new Error('ENOENT: security command not found'), status: null, stderr: '', stdout: '',
       })
       expect(() => handler.getAuth('test@example.com', 'heroku-cli')).to.throw('Failed to retrieve token from macOS Keychain: ENOENT: security command not found')
+    })
+
+    it('should keep a process error ordinary when status is also 44', function () {
+      spawnSyncStub.returns({
+        error: new Error('spawn security EACCES'), status: 44, stderr: 'The specified item could not be found.', stdout: '',
+      })
+
+      expect(() => handler.getAuth('test@example.com', 'heroku-cli')).to.throw(Error, 'Failed to retrieve token from macOS Keychain: spawn security EACCES').and.not.be.instanceOf(NativeCredentialNotFoundError)
     })
 
     it('should scrub sensitive data from retrieval diagnostics', function () {

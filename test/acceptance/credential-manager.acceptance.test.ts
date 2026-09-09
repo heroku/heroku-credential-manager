@@ -207,6 +207,12 @@ describe('credential manager Phase 1 acceptance', function () {
 
       await safeSave(fixture)
       fakeCredentialStore.assertShadowed()
+      const savedMachines = await loadIsolatedNetrc()
+      for (const host of fixture.hosts) {
+        assert.equal(savedMachines[host]?.login, fixture.account)
+        assert.equal(savedMachines[host]?.password, fixture.token)
+      }
+
       assert.deepEqual(await safeGet(fixture.account, fixture.hosts[0], fixture.service), expectedAuth(fixture))
 
       await safeRemove(fixture.account, fixture.hosts, fixture.service)

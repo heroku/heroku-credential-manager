@@ -195,6 +195,15 @@ describe('credential-manager', function () {
       expect(auth).to.deep.equal({account: 'user@example.com', token: 'netrc-token'})
     })
 
+    it('returns the account stored for the host when it differs from the native account hint', async function () {
+      sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new Error('Not found'))
+      sinon.stub(NetrcHandler.prototype, 'getAuth').resolves({login: 'stored@example.com', password: 'stored-token'})
+
+      const auth = await credentialManager.getAuth('hint@example.com', 'api.heroku.com')
+
+      expect(auth).to.deep.equal({account: 'stored@example.com', token: 'stored-token'})
+    })
+
     it('should fall back to netrc if credential store fails', async function () {
       const macosStub = sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new Error('Keychain error'))
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'getAuth')
@@ -228,6 +237,14 @@ describe('credential-manager', function () {
         .to.be.rejectedWith(Error, 'No auth found')
       expect(macosStub.calledOnce).to.be.true
       expect(netrcStub.calledOnce).to.be.true
+    })
+
+    it('should throw error when netrc login is empty', async function () {
+      sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new Error('Not found'))
+      sinon.stub(NetrcHandler.prototype, 'getAuth').resolves({login: undefined, password: 'netrc-token'})
+
+      await expect(credentialManager.getAuth('user@example.com', 'api.heroku.com'))
+        .to.be.rejectedWith(Error, 'No auth found')
     })
 
     it('should fall back to netrc when an account is not provided', async function () {
@@ -349,6 +366,14 @@ describe('credential-manager', function () {
 
     it('should return an empty array when no native credential store is available', async function () {
       process.env.HEROKU_NETRC_WRITE = 'TRUE'
+
+      const accounts = await credentialManager.listKeychainAccounts()
+
+      expect(accounts).to.deep.equal([])
+    })
+
+    it('should return an empty array when native account enumeration fails', async function () {
+      sinon.stub(MacOSHandler.prototype, 'listAccounts').throws(new Error('Keychain error'))
 
       const accounts = await credentialManager.listKeychainAccounts()
 

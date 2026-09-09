@@ -10,6 +10,6 @@ export type KeychainAuthEntry = {
 }
 
 export type AuthEntry = {
-  account: string | undefined
-  token: string | undefined
+  account: string
+  token: string
 }

@@ -146,16 +146,35 @@ describe('acceptance utils', function () {
 
   it('keeps the failing native command shadowed until explicit cleanup', function () {
     const originalPath = process.env.PATH ?? ''
+    const originalCwd = process.cwd()
+    const originalNoDefaultCwd = process.env.NoDefaultCurrentDirectoryInExePath
     const setup = setupFakeCredentialStore()
 
     setup.assertShadowed()
     assert.equal(process.env.PATH?.split(path.delimiter)[0], setup.tmpDir)
-    if (process.platform === 'win32') assert.equal(process.env.PATH, setup.tmpDir)
+    if (process.platform === 'win32') {
+      assert.equal(process.env.PATH, setup.tmpDir)
+      assert.equal(process.cwd(), setup.tmpDir)
+      assert.equal(process.env.NoDefaultCurrentDirectoryInExePath, '1')
+    }
+
     assert.equal(fs.existsSync(setup.commandPath), true)
 
     setup.cleanup()
     setup.cleanup()
     assert.equal(process.env.PATH, originalPath)
+    assert.equal(process.cwd(), originalCwd)
+    assert.equal(process.env.NoDefaultCurrentDirectoryInExePath, originalNoDefaultCwd)
     assert.equal(fs.existsSync(setup.tmpDir), false)
+  })
+
+  it('restores an existing Windows executable-search setting', function () {
+    if (process.platform !== 'win32') this.skip()
+    process.env.NoDefaultCurrentDirectoryInExePath = 'existing-value'
+    const setup = setupFakeCredentialStore()
+
+    setup.cleanup()
+
+    assert.equal(process.env.NoDefaultCurrentDirectoryInExePath, 'existing-value')
   })
 })

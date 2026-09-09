@@ -140,24 +140,29 @@ export function setupFakeCredentialStore(): FakeCredentialStoreSetup {
   const root = assertNativeAcceptanceEnvironment()
   const tmpDir = fs.mkdtempSync(path.join(root, 'fake-native-store-'))
   const originalPath = process.env.PATH ?? ''
+  const originalCwd = process.cwd()
+  const originalNoDefaultCwd = process.env.NoDefaultCurrentDirectoryInExePath
   const pathSeparator = path.delimiter
   let commandName = 'secret-tool'
   if (process.platform === 'darwin') commandName = 'security'
-  if (process.platform === 'win32') commandName = 'powershell.cmd'
+  if (process.platform === 'win32') commandName = 'powershell.exe'
   const commandPath = path.join(tmpDir, commandName)
-  const script = process.platform === 'win32'
-    ? '@echo off\r\nexit /b 1\r\n'
-    : '#!/bin/sh\nexit 1\n'
+  if (process.platform === 'win32') {
+    fs.copyFileSync(process.execPath, commandPath)
+    process.env.NoDefaultCurrentDirectoryInExePath = '1'
+    process.chdir(tmpDir)
+  } else {
+    fs.writeFileSync(commandPath, '#!/bin/sh\nexit 1\n', {mode: 0o755})
+  }
 
-  fs.writeFileSync(commandPath, script, {mode: 0o755})
-  // A batch shim may not satisfy Node's explicit `shell: 'powershell'` lookup.
-  // Removing the original PATH on Windows guarantees the real shell cannot be reached.
   process.env.PATH = process.platform === 'win32' ? tmpDir : `${tmpDir}${pathSeparator}${originalPath}`
 
   let cleaned = false
   const assertShadowed = () => {
     const expectedPath = process.platform === 'win32' ? tmpDir : `${tmpDir}${pathSeparator}${originalPath}`
-    if (cleaned || process.env.PATH !== expectedPath || !fs.existsSync(commandPath)) {
+    const windowsIsolationFailed = process.platform === 'win32'
+      && (process.cwd() !== tmpDir || process.env.NoDefaultCurrentDirectoryInExePath !== '1')
+    if (cleaned || windowsIsolationFailed || process.env.PATH !== expectedPath || !fs.existsSync(commandPath)) {
       throw new Error('Fake native credential store is no longer shadowing the real command.')
     }
   }
@@ -167,6 +172,12 @@ export function setupFakeCredentialStore(): FakeCredentialStoreSetup {
     cleanup() {
       if (cleaned) return
       assertShadowed()
+      if (process.platform === 'win32') {
+        process.chdir(originalCwd)
+        if (originalNoDefaultCwd === undefined) delete process.env.NoDefaultCurrentDirectoryInExePath
+        else process.env.NoDefaultCurrentDirectoryInExePath = originalNoDefaultCwd
+      }
+
       process.env.PATH = originalPath
       fs.rmSync(tmpDir, {force: true, recursive: true})
       cleaned = true

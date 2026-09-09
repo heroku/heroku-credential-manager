@@ -49,7 +49,7 @@ export async function saveAuth(account: string, token: string, hosts: string[], 
 /**
  * Retrieves authentication credentials from the native credential store (if available) or .netrc file.
  *
- * @param account - User's account (email), or undefined to read the requested host directly from netrc
+ * @param account - User's account hint for native storage, or undefined to read the requested host directly from netrc
  * @param host - Hostname for netrc lookup (e.g., 'api.heroku.com')
  * @param service - Service name (defaults to 'heroku-cli')
  * @returns Promise that resolves with the authentication account and token.
@@ -71,7 +71,7 @@ export async function getAuth(account: string | undefined, host: string, service
 
   const auth = await netrcHandler.getAuth(host)
 
-  if (auth.password) {
+  if (auth.login && auth.password) {
     return {account: auth.login, token: auth.password}
   }
 
@@ -82,7 +82,7 @@ export async function getAuth(account: string | undefined, host: string, service
  * Lists all accounts stored in the native credential store for a given service.
  *
  * @param service - Service name (defaults to 'heroku-cli')
- * @returns Array of account names, or empty array if no native credential store is available
+ * @returns Array of account names, or an empty array if native storage is unavailable or enumeration fails
  */
 export async function listKeychainAccounts(service = SERVICE_NAME): Promise<string[]> {
   const config = getStorageConfig()

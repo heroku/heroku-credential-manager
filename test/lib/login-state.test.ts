@@ -1,4 +1,5 @@
 import {expect} from 'chai'
+import assert from 'node:assert/strict'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import {join} from 'node:path'
@@ -118,6 +119,34 @@ describe('login-state', function () {
       expect(raw).to.equal(JSON.stringify({account: 'user@example.com'}) + '\n')
       expect(raw).to.not.contain('token')
       expect(raw).to.not.contain('password')
+    })
+
+    it('refuses a symlinked login state file without changing its destination on non-Windows', async function () {
+      if (process.platform === 'win32') this.skip()
+      const destination = join(tmpDir, 'destination.json')
+      const original = JSON.stringify({account: 'original@example.com'})
+      fs.writeFileSync(destination, original)
+      fs.symlinkSync('destination.json', join(tmpDir, 'login.json'))
+
+      await assert.rejects(writeLoginState(tmpDir, 'replacement@example.com'))
+
+      expect(fs.readFileSync(destination, 'utf8')).to.equal(original)
+      expect(fs.lstatSync(join(tmpDir, 'login.json')).isSymbolicLink()).to.be.true
+    })
+
+    it('refuses a symlinked data directory without changing its destination on non-Windows', async function () {
+      if (process.platform === 'win32') this.skip()
+      const destination = join(tmpDir, 'destination')
+      const dataDir = join(tmpDir, 'linked-data')
+      const original = JSON.stringify({account: 'original@example.com'})
+      fs.mkdirSync(destination)
+      fs.writeFileSync(join(destination, 'login.json'), original)
+      fs.symlinkSync('destination', dataDir)
+
+      await assert.rejects(writeLoginState(dataDir, 'replacement@example.com'))
+
+      expect(fs.readFileSync(join(destination, 'login.json'), 'utf8')).to.equal(original)
+      expect(fs.lstatSync(dataDir).isSymbolicLink()).to.be.true
     })
   })
 

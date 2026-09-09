@@ -159,7 +159,7 @@ import type {AuthEntry, KeychainAuthEntry, NetrcAuthEntry, StorageConfig} from '
 import {getAuth, removeAuth, saveAuth} from '${packageName}'
 
 const auth: AuthEntry = {account: 'package-fixture@example.com', token: 'package-fixture-token'}
-const keychain: KeychainAuthEntry = {account: auth.account!, service: 'package-fixture', token: auth.token!}
+const keychain: KeychainAuthEntry = {account: auth.account, service: 'package-fixture', token: auth.token}
 const netrc: NetrcAuthEntry = {login: keychain.account, password: keychain.token}
 const storage: StorageConfig = {credentialStore: null, useNetrc: true}
 

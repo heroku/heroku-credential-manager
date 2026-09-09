@@ -152,7 +152,7 @@ export function setupFakeCredentialStore(): FakeCredentialStoreSetup {
     process.env.NoDefaultCurrentDirectoryInExePath = '1'
     process.chdir(tmpDir)
   } else {
-    fs.writeFileSync(commandPath, '#!/bin/sh\nexit 1\n', {mode: 0o755})
+    fs.writeFileSync(commandPath, '#!/bin/sh\nprintf "%s\\n" "simulated native backend failure" >&2\nexit 1\n', {mode: 0o755})
   }
 
   process.env.PATH = process.platform === 'win32' ? tmpDir : `${tmpDir}${pathSeparator}${originalPath}`

@@ -6,16 +6,12 @@
     "importHelpers": true,
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "noImplicitAny": true,
     "outDir": "./dist",
     "resolveJsonModule": true,
-    "rootDirs": [
-      "./src",
-    ],
+    "rootDir": "./src",
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2022",
-    "typeRoots": [ "./node_modules/@types" ],
     "verbatimModuleSyntax": true
   },
   "include": [

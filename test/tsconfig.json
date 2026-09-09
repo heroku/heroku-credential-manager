@@ -1,8 +1,11 @@
 {
   "extends": "../tsconfig.json",
   "compilerOptions": {
+    "declaration": false,
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "rootDir": "..",
     "sourceMap": true,
     "types": ["mocha", "node"]
   },

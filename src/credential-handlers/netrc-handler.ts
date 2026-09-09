@@ -9,11 +9,9 @@ const credDebug = debug('heroku-credential-manager')
 export class NetrcHandler {
   public readonly netrc: Netrc
 
-  /**
-   * Creates a new NetrcHandler instance.
-   */
-  constructor() {
-    this.netrc = new Netrc()
+  /** @param file - Optional netrc path; otherwise uses the default location. */
+  constructor(file?: string) {
+    this.netrc = new Netrc(file)
   }
 
   /**
@@ -34,28 +32,67 @@ export class NetrcHandler {
   /**
    * Removes authentication credentials for a given host.
    * @param host - The hostname to remove credentials for.
-   * @returns A promise that resolves when the credentials are removed.
+   * @param account - Optional login that existing credentials must exactly match.
+   * @returns A promise that resolves when removal is complete.
    */
-  public async removeAuth(host: string) {
+  public async removeAuth(host: string, account?: string) {
+    await this.removeAuthForHosts([host], account)
+  }
+
+  /**
+   * Removes credentials for multiple hosts with a single netrc load/save.
+   * Only entries with an exactly matching login are removed when account is defined.
+   * @param hosts - The hostnames to remove credentials for.
+   * @param account - Optional login that existing credentials must exactly match.
+   * @returns A promise that resolves when removal is complete.
+   */
+  public async removeAuthForHosts(hosts: string[], account?: string) {
+    if (hosts.length === 0) return
+    this.validateHosts(hosts, 'remove')
     await this.netrc.load()
-    if (!this.netrc.machines[host]) {
-      credDebug(`No credentials to logout for ${host}`)
-      console.error(`No credentials to logout for ${host}`)
-      return
+    let changed = false
+    for (const host of hosts) {
+      const machine = this.netrc.machines[host]
+      if (!machine || (account !== undefined && machine.login !== account)) {
+        credDebug(`No credentials to logout for ${host}`)
+        continue
+      }
+
+      delete this.netrc.machines[host]
+      changed = true
     }
 
-    delete this.netrc.machines[host]
-    await this.netrc.save()
+    if (changed) await this.netrc.save()
   }
 
   /**
    * Saves authentication credentials for a given host.
-   * @param auth - The authentication entry containing login and password.
+   * @param auth - The authentication entry to save.
    * @param host - The hostname to save credentials for.
    * @returns A promise that resolves when the credentials are saved.
    */
   public async saveAuth(auth: NetrcAuthEntry, host: string) {
+    await this.saveAuthForHosts(auth, [host])
+  }
+
+  /**
+   * Saves the same credentials for multiple hosts with a single netrc load/save.
+   * @param auth - The authentication entry to save.
+   * @param hosts - The hostnames to save credentials for.
+   * @returns A promise that resolves when the credentials are saved.
+   */
+  public async saveAuthForHosts(auth: NetrcAuthEntry, hosts: string[]) {
+    this.validateHosts(hosts, 'save', true)
+
     await this.netrc.load()
+    for (const host of hosts) {
+      this.applyAuthToHost(auth, host)
+    }
+
+    await this.netrc.save()
+  }
+
+  private applyAuthToHost(auth: NetrcAuthEntry, host: string) {
     if (!this.netrc.machines[host]) this.netrc.machines[host] = {}
     this.netrc.machines[host] = {
       login: auth.login,
@@ -71,7 +108,12 @@ export class NetrcHandler {
         }
       }
     }
+  }
 
-    await this.netrc.save()
+  private validateHosts(hosts: string[], operation: 'remove' | 'save', requireHost = false) {
+    if ((requireHost && hosts.length === 0) || hosts.some(host => typeof host !== 'string' || host.length === 0 || /[\s\0]/.test(host))) {
+      const preposition = operation === 'save' ? 'to' : 'from'
+      throw new Error(`Cannot ${operation} credentials ${preposition} netrc: provide at least one valid, non-empty host`)
+    }
   }
 }

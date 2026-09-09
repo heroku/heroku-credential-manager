@@ -1,1 +1,4 @@
-../CODEOWNERS
+# Keep this file in sync with the repository-level CODEOWNERS file.
+
+#GUSINFO: Heroku FE Dev Tools,Heroku CLI & Plugins
+* @heroku/frontend-dev-tooling

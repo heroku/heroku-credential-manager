@@ -3,6 +3,18 @@ import childProcess from 'node:child_process'
 
 import type {KeychainAuthEntry} from '../lib/types.js'
 
+import {NativeCredentialNotFoundError} from '../native-credential-not-found-error.js'
+
+class InvalidCredentialValueError extends Error {}
+
+interface SecretToolResult {
+  error?: Error
+  signal?: NodeJS.Signals | null
+  status: null | number
+  stderr?: Buffer | null | string
+  stdout?: Buffer | null | string
+}
+
 /**
  * Handles credential storage, removal, and retrieval using the Linux Secret Service API.
  * Uses the secret-tool command-line utility (part of libsecret) to interact with desktop keyrings.
@@ -19,24 +31,44 @@ export class LinuxHandler {
    * @param account - The account login to use (e.g. 'test@example.com')
    * @param service - The service name to use
    * @returns The stored authentication token.
-   * @throws Error if the token is not found or retrieval fails.
+   * @throws NativeCredentialNotFoundError if the token is not found; Error if retrieval fails.
    */
   public getAuth(account: string, service: string): string {
     try {
-      const output = childProcess.execSync(
-        `secret-tool lookup service "${service}" account "${account}"`,
+      this.validateValue(account, 'Account')
+      this.validateValue(service, 'Service')
+
+      const spawnResult = childProcess.spawnSync(
+        'secret-tool',
+        ['lookup', '--', 'service', service, 'account', account],
         {encoding: 'utf8'},
       )
-      const token = output.trim()
+
+      if (this.isMissingSecretLookupFailure(spawnResult)) {
+        throw new NativeCredentialNotFoundError('exit 1')
+      }
+
+      this.throwOnFailure(spawnResult, status => `exit ${status ?? -1}`)
+
+      const token = spawnResult.stdout.trim()
 
       if (!token) {
-        throw new Error('Token not found')
+        throw new NativeCredentialNotFoundError('Token not found')
       }
 
       return token
     } catch (error) {
       const {message} = error as Error
-      throw new Error(`Failed to retrieve token from Linux keyring: ${this.scrubError(message)}`)
+      if (error instanceof InvalidCredentialValueError) {
+        throw new TypeError(`Failed to retrieve token from Linux keyring: ${message}`)
+      }
+
+      const diagnostic = `Failed to retrieve token from Linux keyring: ${this.scrubError(message, [account, service])}`
+      if (error instanceof NativeCredentialNotFoundError) {
+        throw new NativeCredentialNotFoundError(diagnostic)
+      }
+
+      throw new Error(diagnostic)
     }
   }
 
@@ -48,28 +80,29 @@ export class LinuxHandler {
    */
   public listAccounts(service: string): string[] {
     try {
-      const output = childProcess.execSync(
-        `secret-tool search --all service "${service}"`,
+      this.validateValue(service, 'Service')
+
+      const spawnResult = childProcess.spawnSync(
+        'secret-tool',
+        ['search', '--all', '--', 'service', service],
         {encoding: 'utf8'},
       )
 
-      // Expected output format:
-      // [/org/freedesktop/secrets/collection/login/###]
-      // label = Label Name
-      // secret = secret-value
-      // created = 2024-01-01 12:00:00
-      // modified = 2024-01-01 12:00:00
-      // schema = org.freedesktop.Secret.Generic
-      // attribute.service = heroku-cli
-      // attribute.account = user@example.com
-      // (blank line between entries)
+      this.throwOnFailure(spawnResult, () => 'Unknown error')
+
+      /*
+       * Expected output format:
+       * stdout: label, secret, created, modified, schema lines
+       * stderr: attribute.service / attribute.account lines
+       */
 
       const accounts: string[] = []
-      const lines = output.split('\n')
+      const lines = (spawnResult.stderr ?? '').split('\n')
 
       for (const line of lines) {
-        if (line.startsWith('attribute.account = ')) {
-          const account = line.slice('attribute.account = '.length).trim()
+        const match = line.trim().match(/^attribute\.account\s*=\s*(.+)$/)
+        if (match) {
+          const account = match[1].trim()
           if (account) {
             accounts.push(account)
           }
@@ -79,7 +112,11 @@ export class LinuxHandler {
       return accounts
     } catch (error) {
       const {message} = error as Error
-      throw new Error(`Failed to list accounts in Linux keyring: ${this.scrubError(message)}`)
+      if (error instanceof InvalidCredentialValueError) {
+        throw new TypeError(`Failed to list accounts in Linux keyring: ${message}`)
+      }
+
+      throw new Error(`Failed to list accounts in Linux keyring: ${this.scrubError(message, [service])}`)
     }
   }
 
@@ -92,13 +129,27 @@ export class LinuxHandler {
    */
   public removeAuth(account: string, service: string): void {
     try {
-      childProcess.execSync(
-        `secret-tool clear service "${service}" account "${account}"`,
-        {encoding: 'utf8'},
+      this.validateValue(account, 'Account')
+      this.validateValue(service, 'Service')
+
+      const spawnResult = childProcess.spawnSync(
+        'secret-tool',
+        ['clear', '--', 'service', service, 'account', account],
+        {encoding: 'utf8', env: {...process.env, LC_ALL: 'C'}},
       )
+
+      if (this.isMissingSecretClearFailure(spawnResult)) {
+        return
+      }
+
+      this.throwOnFailure(spawnResult, status => `exit ${status ?? -1}`)
     } catch (error) {
-      const {message} = error as Error
-      throw new Error(`Failed to remove token from Linux keyring: ${this.scrubError(message)}`)
+      const message = error instanceof Error ? error.message : String(error)
+      if (error instanceof InvalidCredentialValueError) {
+        throw new TypeError(`Failed to remove token from Linux keyring: ${message}`)
+      }
+
+      throw new Error(`Failed to remove token from Linux keyring: ${this.scrubError(message, [account, service])}`)
     }
   }
 
@@ -111,11 +162,16 @@ export class LinuxHandler {
    */
   public saveAuth(auth: KeychainAuthEntry): void {
     try {
-      const process = childProcess.spawnSync(
+      this.validateValue(auth.account, 'Account')
+      this.validateValue(auth.service, 'Service')
+      this.validateValue(auth.token, 'Token')
+
+      const spawnResult = childProcess.spawnSync(
         'secret-tool',
         [
           'store',
           '--label=Heroku CLI',
+          '--',
           'service',
           auth.service,
           'account',
@@ -127,28 +183,78 @@ export class LinuxHandler {
         },
       )
 
-      if (process.error) {
-        throw process.error
-      }
-
-      if (process.status !== 0) {
-        const stderr = process.stderr || 'Unknown error'
-        throw new Error(stderr)
-      }
+      this.throwOnFailure(spawnResult, () => 'Unknown error')
     } catch (error) {
       const {message} = error as Error
-      throw new Error(`Failed to store token in Linux keyring: ${this.scrubError(message)}`)
+      if (error instanceof InvalidCredentialValueError) {
+        throw new TypeError(`Failed to store token in Linux keyring: ${message}`)
+      }
+
+      throw new Error(`Failed to store token in Linux keyring: ${this.scrubError(message, [auth.account, auth.service, auth.token])}`)
     }
+  }
+
+  /**
+   * secret-tool clear fails when no matching credential exists; treat as successful no-op for logout.
+   * @param result - The secret-tool process result
+   * @returns Whether the failure means no matching credential exists
+   */
+  private isMissingSecretClearFailure(result: SecretToolResult): boolean {
+    // secret-tool clear exits 1 with no output when nothing matched (locale-independent).
+    return !result.error
+      && !result.signal
+      && result.status === 1
+      && (result.stderr ?? '').toString() === ''
+  }
+
+  private isMissingSecretLookupFailure(result: SecretToolResult): boolean {
+    return !result.error
+      && !result.signal
+      && result.status === 1
+      && (result.stdout ?? '').toString() === ''
+      && (result.stderr ?? '').toString() === ''
   }
 
   /**
    * Scrubs account names and passwords/tokens from error messages.
    *
    * @param message - The error message to scrub
+   * @param values - Exact sensitive values to scrub
    * @returns The scrubbed error message with sensitive data replaced by "[SCRUBBED]"
    */
-  private scrubError(message: string): string {
-    const result = this.scrubber.scrub({message})
+  private scrubError(message: string, values: string[] = []): string {
+    let scrubbedMessage = message
+    const sensitiveVariants = values.flatMap(value => {
+      const normalized = value.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
+      const crlfNormalized = normalized.replaceAll('\n', '\r\n')
+      return [value, normalized, crlfNormalized].flatMap(variant => [variant, Buffer.from(variant, 'utf8').toString('base64')])
+    }).filter(Boolean)
+
+    for (const value of [...new Set(sensitiveVariants)].sort((left, right) => right.length - left.length)) {
+      scrubbedMessage = scrubbedMessage.replaceAll(value, '[SCRUBBED]')
+    }
+
+    const result = this.scrubber.scrub({message: scrubbedMessage})
     return result.data.message
+  }
+
+  private throwOnFailure(result: SecretToolResult, fallback: (status: null | number) => string): void {
+    if (result.error) {
+      throw result.error
+    }
+
+    if (result.signal) {
+      throw new Error(`terminated by signal ${result.signal}`)
+    }
+
+    if (result.status !== 0) {
+      throw new Error(result.stderr?.toString() || fallback(result.status))
+    }
+  }
+
+  private validateValue(value: string, name: string): void {
+    if (value.includes('\0')) {
+      throw new InvalidCredentialValueError(`${name} must not contain NUL characters`)
+    }
   }
 }

@@ -28,6 +28,42 @@ export type MachinesWithTokens = {
 } & Machines
 
 const credDebug = debug('heroku-credential-manager')
+const secureFileMode = 0o600
+
+function secureWriteFlags(): number {
+  const noFollow = process.platform === 'win32' ? 0 : fs.constants.O_NOFOLLOW ?? 0
+  const nonBlocking = process.platform === 'win32' ? 0 : fs.constants.O_NONBLOCK
+  // eslint-disable-next-line no-bitwise
+  return fs.constants.O_CREAT | fs.constants.O_WRONLY | noFollow | nonBlocking
+}
+
+function validateRegularFile(stats: fs.Stats, file: string): void {
+  if (!stats.isFile()) throw new Error(`Refusing to write netrc data to non-regular file: ${file}`)
+}
+
+async function writeFileSecurely(file: string, body: string): Promise<void> {
+  const handle = await fs.promises.open(file, secureWriteFlags(), secureFileMode)
+  try {
+    validateRegularFile(await handle.stat(), file)
+    if (process.platform !== 'win32') await handle.chmod(secureFileMode)
+    await handle.truncate(0)
+    await handle.writeFile(body)
+  } finally {
+    await handle.close()
+  }
+}
+
+function writeFileSecurelySync(file: string, body: string): void {
+  const descriptor = fs.openSync(file, secureWriteFlags(), secureFileMode)
+  try {
+    validateRegularFile(fs.fstatSync(descriptor), file)
+    if (process.platform !== 'win32') fs.fchmodSync(descriptor, secureFileMode)
+    fs.ftruncateSync(descriptor, 0)
+    fs.writeFileSync(descriptor, body)
+  } finally {
+    fs.closeSync(descriptor)
+  }
+}
 
 /**
  * Creates ES6 proxy objects from parsed tokens to allow easy modification by consumers.
@@ -191,13 +227,15 @@ export class Netrc {
         return stdout
       }
 
-      const body = await (path.extname(this.file) === '.gpg' ? decryptFile() : new Promise<string>((resolve, reject) => {
-        fs.readFile(this.file, {encoding: 'utf8'}, (err, data) => {
-          if (err && err.code !== 'ENOENT') reject(err)
-          debug('ENOENT')
-          resolve(data || '')
-        })
-      }))
+      const body = await (path.extname(this.file) === '.gpg'
+        ? decryptFile()
+        : new Promise<string>((resolve, reject) => {
+          fs.readFile(this.file, {encoding: 'utf8'}, (err, data) => {
+            if (err && err.code !== 'ENOENT') reject(err)
+            debug('ENOENT')
+            resolve(data || '')
+          })
+        }))
       this.machines = parse(body)
       credDebug('machines: %o', Object.keys(this.machines))
     } catch (error) {
@@ -251,9 +289,7 @@ export class Netrc {
       body = stdout
     }
 
-    return new Promise<void>((resolve, reject) => {
-      fs.writeFile(this.file, body, {mode: 0o600}, err => (err ? reject(err) : resolve()))
-    })
+    await writeFileSecurely(this.file, body)
   }
 
   /**
@@ -270,7 +306,7 @@ export class Netrc {
       body = stdout
     }
 
-    fs.writeFileSync(this.file, body, {mode: 0o600})
+    writeFileSecurelySync(this.file, body)
   }
 
   /**
@@ -306,13 +342,20 @@ export class Netrc {
    * @returns The path to the default netrc file
    */
   private get defaultFile(): string {
-    const home = (os.platform() === 'win32'
-        && (process.env.HOME
-          || (process.env.HOMEDRIVE && process.env.HOMEPATH && path.join(process.env.HOMEDRIVE!, process.env.HOMEPATH!))
-          || process.env.USERPROFILE))
-      || os.homedir()
-      || os.tmpdir()
-    const file = path.join(home, os.platform() === 'win32' ? '_netrc' : '.netrc')
+    let home: string | undefined
+    if (os.platform() === 'win32') {
+      const fromDrive
+        = process.env.HOMEDRIVE && process.env.HOMEPATH
+          ? path.join(process.env.HOMEDRIVE, process.env.HOMEPATH)
+          : undefined
+      home = process.env.HOME || fromDrive || process.env.USERPROFILE
+    }
+
+    const resolved = home || os.homedir() || os.tmpdir()
+    const file = path.join(
+      resolved,
+      os.platform() === 'win32' ? '_netrc' : '.netrc',
+    )
     const gpgFile = `${file}.gpg`
     return fs.existsSync(gpgFile) ? gpgFile : file
   }

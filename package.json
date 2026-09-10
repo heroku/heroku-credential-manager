@@ -19,6 +19,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./login": {
+      "types": "./dist/login/index.d.ts",
+      "import": "./dist/login/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

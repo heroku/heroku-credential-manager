@@ -10,6 +10,7 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'heroku-credential-manager-package-'))
 const packDirectory = path.join(temporaryRoot, 'pack')
 const consumerDirectory = path.join(temporaryRoot, 'consumer')
+const loginTypesDirectory = path.join(temporaryRoot, 'login-types-consumer')
 const isolatedHome = path.join(temporaryRoot, 'home')
 const forbiddenDependencies = new Set([
   'inquirer',
@@ -124,6 +125,7 @@ function assertProductionDependencies(tree) {
 try {
   fs.mkdirSync(packDirectory)
   fs.mkdirSync(consumerDirectory)
+  fs.mkdirSync(loginTypesDirectory)
   fs.mkdirSync(isolatedHome)
 
   const packOutput = npm(packageRoot,
@@ -145,25 +147,103 @@ try {
 
   const installedPackageRoot = path.join(consumerDirectory, 'node_modules', ...packageName.split('/'))
   const installedPackage = JSON.parse(fs.readFileSync(path.join(installedPackageRoot, 'package.json'), 'utf8'))
-  assert.deepEqual(Object.keys(installedPackage.exports).sort(), ['.', './package.json'])
-  assert.equal(installedPackage.exports['./login'], undefined)
+  assert.deepEqual(Object.keys(installedPackage.exports).sort(), ['.', './login', './package.json'])
   const graphSize = assertSafeDistGraph(installedPackageRoot)
 
   const dependencyTree = JSON.parse(npm(consumerDirectory, 'ls', '--omit=dev', '--all', '--json'))
   assertProductionDependencies(dependencyTree)
+
+  fs.writeFileSync(path.join(loginTypesDirectory, 'package.json'), JSON.stringify({
+    name: 'packed-login-types-consumer',
+    private: true,
+    type: 'module',
+  }, null, 2))
+  npm(loginTypesDirectory, 'install', '--ignore-scripts', '--no-audit', '--no-fund', tarball, 'typescript@^5.9.3')
+  fs.writeFileSync(path.join(loginTypesDirectory, 'login-only.ts'), `
+import type {LoginTimers} from '${packageName}/login'
+
+const handle = {}
+const timers: LoginTimers = {
+  clearTimeout(timer) { void timer },
+  setTimeout(handler, timeoutMs) { void [handler, timeoutMs]; return handle },
+}
+void timers
+`)
+  fs.writeFileSync(path.join(loginTypesDirectory, 'tsconfig.json'), JSON.stringify({
+    compilerOptions: {
+      lib: ['ES2022', 'DOM'],
+      module: 'NodeNext',
+      moduleResolution: 'NodeNext',
+      noEmit: true,
+      strict: true,
+      target: 'ES2022',
+      types: [],
+    },
+    include: ['login-only.ts'],
+  }, null, 2))
+  assert.equal(fs.existsSync(path.join(loginTypesDirectory, 'node_modules', '@types', 'node')), false)
+  execFileSync(process.execPath, [path.join(loginTypesDirectory, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', 'tsconfig.json'], {
+    cwd: loginTypesDirectory,
+    stdio: 'inherit',
+  })
 
   npm(consumerDirectory, 'install', '--save-dev', '--ignore-scripts', '--no-audit', '--no-fund', 'typescript@^5.9.3', '@types/node@^22.15.3')
 
   fs.writeFileSync(path.join(consumerDirectory, 'type-imports.ts'), `
 import type {AuthEntry, KeychainAuthEntry, NetrcAuthEntry, StorageConfig} from '${packageName}'
 import {getAuth, NativeCredentialNotFoundError, removeAuth, saveAuth} from '${packageName}'
+import type {
+  LoginBrowser,
+  LoginConfig,
+  LoginEnvironment,
+  LoginHttp,
+  LoginHttpRequest,
+  LoginHttpResponse,
+  LoginMethod,
+  LoginOptions,
+  LoginOutput,
+  LoginProgress,
+  LoginPrompt,
+  LoginPromptSelection,
+  LoginResult,
+  LoginStorage,
+  LoginTimers,
+} from '${packageName}/login'
+import {Login, LoginCancelledError, LoginHttpError} from '${packageName}/login'
 
 const auth: AuthEntry = {account: 'package-fixture@example.com', token: 'package-fixture-token'}
 const keychain: KeychainAuthEntry = {account: auth.account, service: 'package-fixture', token: auth.token}
 const netrc: NetrcAuthEntry = {login: keychain.account, password: keychain.token}
 const storage: StorageConfig = {credentialStore: null, useNetrc: true}
+const method: LoginMethod = 'browser'
+const options: LoginOptions = {method}
+const result: LoginResult = auth
+const config: LoginConfig = {apiUrl: 'https://api.heroku.com'}
+const request: LoginHttpRequest = {method: 'GET'}
+const response: LoginHttpResponse<unknown> = {body: {}, headers: {}, ok: true, status: 200}
+const selection: LoginPromptSelection = {cancelled: 'quit'}
+const http: LoginHttp = {async request<T>() { return response as LoginHttpResponse<T> }}
+const prompt: LoginPrompt = {
+  async accessToken() { return 'token' },
+  async email() { return 'package-fixture@example.com' },
+  async loginMethod() { return {method: 'browser'} },
+  async organization() { return 'org' },
+  async password() { return 'password' },
+  async secondFactor() { return '123456' },
+}
+const browser: LoginBrowser = {async open() {}}
+const output: LoginOutput = {warn() {}, write() {}}
+const progress: LoginProgress = {start() {}, stop() {}}
+const environment: LoginEnvironment = {get() { return undefined }}
+const timers = null as unknown as LoginTimers
+const loginStorage = null as unknown as LoginStorage
+const login = new Login({browser, config, environment, http, output, progress, prompt})
+const cancelled = new LoginCancelledError('quit')
+const httpError = new LoginHttpError(401, {id: 'unauthorized'})
 
-void [auth, keychain, netrc, storage, getAuth, NativeCredentialNotFoundError, removeAuth, saveAuth]
+void [auth, browser, cancelled, config, environment, getAuth, http, httpError, keychain, login, loginStorage, method,
+  NativeCredentialNotFoundError, netrc, options, output, progress, prompt, removeAuth, request, response, result,
+  saveAuth, selection, storage, timers]
 `)
   fs.writeFileSync(path.join(consumerDirectory, 'tsconfig.json'), JSON.stringify({
     compilerOptions: {
@@ -185,6 +265,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import * as credentialManager from '${packageName}'
+import * as loginModule from '${packageName}/login'
 
 assert.equal(typeof credentialManager.saveAuth, 'function')
 assert.equal(typeof credentialManager.getAuth, 'function')
@@ -193,7 +274,29 @@ assert.equal(typeof credentialManager.removeAuth, 'function')
 const missingCredentialError = new credentialManager.NativeCredentialNotFoundError('Token not found')
 assert.equal(missingCredentialError.name, 'NativeCredentialNotFoundError')
 assert.equal(missingCredentialError.message, 'Token not found')
-await assert.rejects(import('${packageName}/login'), error => error.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED')
+assert.equal(typeof loginModule.Login, 'function')
+assert.equal(typeof loginModule.LoginCancelledError, 'function')
+assert.equal(typeof loginModule.LoginHttpError, 'function')
+const fakeHttp = {async request() { throw new Error('not executed') }}
+const fakePrompt = {
+  async accessToken() { return 'unused' },
+  async email() { return 'unused@example.com' },
+  async loginMethod() { return {cancelled: 'quit'} },
+  async organization() { return 'unused' },
+  async password() { return 'unused' },
+  async secondFactor() { return 'unused' },
+}
+const fakeStorage = {
+  async deleteLoginState() {},
+  async getAuth() { throw new Error('not executed') },
+  hasNativeStorage() { return false },
+  async readLoginState() {},
+  async removeAuth() {},
+  async saveAuth() {},
+  async writeLoginState() {},
+}
+const login = new loginModule.Login({http: fakeHttp, prompt: fakePrompt, storage: fakeStorage})
+assert.equal(login instanceof loginModule.Login, true)
 
 const temporaryRoot = ${JSON.stringify(temporaryRoot)}
 const expectedHome = ${JSON.stringify(isolatedHome)}

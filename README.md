@@ -8,6 +8,7 @@ A library for managing Heroku CLI credentials. It uses the native credential sto
 - Selects appropriate credential management tool based on system capabilities.
 - Uses `.netrc` when native storage is unavailable or when `HEROKU_NETRC_WRITE=true`.
 - Removes credentials from both native storage and `.netrc` so stale credentials are cleaned up when storage modes change.
+- Provides an isolated `@heroku/heroku-credential-manager/login` entry point for injected browser, interactive, and legacy SSO login flows.
 
 ## Quick Start
 
@@ -68,6 +69,31 @@ try {
 ```
 
 Top-level `removeAuth` removes the supplied `.netrc` hosts regardless of their stored login so logout can clean credentials after storage-mode changes.
+
+### Injected login consumers
+
+Login is intentionally available only from the `/login` subpath. Consumers provide semantic prompts and may inject HTTP, browser opening, output/progress, timers, environment/config, and storage behavior. This keeps command frameworks and browser packages outside the credential manager:
+
+```typescript
+import {Login} from '@heroku/heroku-credential-manager/login'
+
+const login = new Login({
+  browser: {open: async url => launchBrowser(url)},
+  prompt: {
+    accessToken: () => promptSecret('Access token'),
+    email: previous => promptText('Email', previous),
+    loginMethod: () => readLoginKey(),
+    organization: previous => promptText('Organization name', previous),
+    password: () => promptSecret('Password'),
+    secondFactor: () => promptSecret('Two-factor code'),
+  },
+})
+
+const auth = await login.login({method: 'browser'})
+await login.logout(auth)
+```
+
+`login()` supports `browser`, `interactive`, and `sso`, returns a persisted `{account, token}`, never revokes an existing session during re-login, and rejects cancellation with `LoginCancelledError` (`exitCode` is `130` for Ctrl-C and `0` for `q`). Browser and SSO flows always emit a manual URL; failure to open a browser does not invalidate that flow. The default storage adapter uses this package's native/`.netrc` APIs and writes login state only when native storage and `dataDir` are available. `logout(entry?)` always clears local API/Git credentials and login state, including when remote revocation fails.
 
 ## Development
 

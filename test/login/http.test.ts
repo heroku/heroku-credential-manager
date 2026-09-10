@@ -1,4 +1,5 @@
 import {expect} from 'chai'
+import {createRequire} from 'node:module'
 import sinon from 'sinon'
 
 import type {LoginHttp} from '../../src/login/index.js'
@@ -6,6 +7,10 @@ import type {LoginHttp} from '../../src/login/index.js'
 import {
   FetchLoginHttp, LoginHttpError, checkedRequest, normalizeLoginHttpError,
 } from '../../src/login/http.js'
+
+const require = createRequire(import.meta.url)
+const packageMetadata = require('../../package.json') as {name: string, version: string}
+const expectedUserAgent = `${packageMetadata.name}/${packageMetadata.version} node-${process.version}`
 
 function expectNoSensitiveSurface(error: Error, sensitiveValue: string): void {
   const inspected: string[] = []
@@ -272,7 +277,12 @@ describe('login HTTP', function () {
       expect(result.headers['x-request-id']).to.equal('request-id')
       const options = fetchStub.firstCall.args[1] as RequestInit
       expect(options.body).to.equal('{"name":"example"}')
-      expect(options.headers).to.deep.equal({authorization: 'Bearer token', 'content-type': 'application/custom+json'})
+      expect(options.headers).to.deep.equal({
+        authorization: 'Bearer token',
+        'content-type': 'application/custom+json',
+        'user-agent': expectedUserAgent,
+      })
+      expect(options.redirect).to.equal('error')
     })
 
     it('returns text and empty response bodies without adding a content type for bodyless requests', async function () {
@@ -284,7 +294,22 @@ describe('login HTTP', function () {
       const http = new FetchLoginHttp()
       expect(await http.request<string>('https://api.heroku.test/text', {method: 'GET'})).to.deep.include({body: 'plain text', ok: false, status: 400})
       expect(await http.request<undefined>('https://api.heroku.test/empty', {method: 'DELETE'})).to.deep.include({body: undefined, ok: true, status: 204})
-      expect(fetchStub.firstCall.args[1].headers).to.deep.equal({})
+      expect(fetchStub.firstCall.args[1].headers).to.deep.equal({'user-agent': expectedUserAgent})
+      expect(fetchStub.firstCall.args[1].redirect).to.equal('error')
+      expect(fetchStub.secondCall.args[1].redirect).to.equal('error')
+    })
+
+    it('allows callers to override the package User-Agent', async function () {
+      const fetchStub = sinon.stub().resolves(new Response('{}', {status: 200}))
+      globalThis.fetch = fetchStub as unknown as typeof fetch
+
+      await new FetchLoginHttp().request('https://api.heroku.test/example', {
+        headers: {'User-Agent': 'heroku-cli/test'},
+        method: 'GET',
+      })
+
+      expect(fetchStub.firstCall.args[1].headers).to.deep.equal({'User-Agent': 'heroku-cli/test'})
+      expect(fetchStub.firstCall.args[1].redirect).to.equal('error')
     })
 
     it('propagates parent abort reasons and removes the parent listener', async function () {

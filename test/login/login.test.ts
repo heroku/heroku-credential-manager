@@ -252,7 +252,7 @@ describe('Login', function () {
       expect(method.notCalled).to.be.true
     })
 
-    it('derives persistence hosts from configured API URL and HEROKU_HOST', async function () {
+    it('derives persistence hosts from explicit API config and allowed HEROKU_HOST', async function () {
       const saveFromUrl = sinon.stub().resolves()
       const first = loginFixture({
         config: {apiUrl: 'https://custom-api.example.test'},
@@ -265,22 +265,22 @@ describe('Login', function () {
       const saveFromHost = sinon.stub().resolves()
       const second = loginFixture({
         config: {},
-        environment: environment({HEROKU_HOST: 'example.test'}),
+        environment: environment({HEROKU_HOST: 'staging.heroku.com'}),
         storage: storage({saveAuth: saveFromHost}),
       })
       queueInteractive(second.http)
       await second.login.login({method: 'interactive'})
-      expect(saveFromHost.firstCall.args[2]).to.deep.equal(['api.example.test', 'git.example.test'])
+      expect(saveFromHost.firstCall.args[2]).to.deep.equal(['api.staging.heroku.com', 'git.staging.heroku.com'])
 
       const saveFromUrlHost = sinon.stub().resolves()
       const third = loginFixture({
         config: {},
-        environment: environment({HEROKU_HOST: 'https://api.staging.example.test'}),
+        environment: environment({HEROKU_HOST: 'https://api.staging.heroku.com'}),
         storage: storage({saveAuth: saveFromUrlHost}),
       })
       queueInteractive(third.http)
       await third.login.login({method: 'interactive'})
-      expect(saveFromUrlHost.firstCall.args[2]).to.deep.equal(['api.staging.example.test', 'api.staging.example.test'])
+      expect(saveFromUrlHost.firstCall.args[2]).to.deep.equal(['api.staging.heroku.com', 'api.staging.heroku.com'])
     })
 
     it('preserves custom API ports for login HTTP and credential storage', async function () {
@@ -310,13 +310,13 @@ describe('Login', function () {
       const saveAuth = sinon.stub().resolves()
       const fixture = loginFixture({
         config: {},
-        environment: environment({HEROKU_HOST: 'https://api.staging.example.test:8443'}),
+        environment: environment({HEROKU_HOST: 'https://api.staging.heroku.com:8443'}),
         storage: storage({saveAuth}),
       })
       queueInteractive(fixture.http)
       await fixture.login.login({method: 'interactive'})
-      expect(fixture.http.requests[0].url).to.equal('https://api.staging.example.test:8443/oauth/authorizations')
-      expect(saveAuth.firstCall.args[2]).to.deep.equal(['api.staging.example.test:8443', 'api.staging.example.test:8443'])
+      expect(fixture.http.requests[0].url).to.equal('https://api.staging.heroku.com:8443/oauth/authorizations')
+      expect(saveAuth.firstCall.args[2]).to.deep.equal(['api.staging.heroku.com:8443', 'api.staging.heroku.com:8443'])
     })
 
     it('accepts HTTPS and loopback HTTP endpoints', async function () {
@@ -354,8 +354,13 @@ describe('Login', function () {
     it('rejects unsafe endpoint environment values before sending credentials', function () {
       for (const values of [
         {HEROKU_API_URL: 'http://attacker.test'},
+        {HEROKU_API_URL: 'https://attacker.test'},
         {HEROKU_GIT_HOST: 'git.heroku.test/path'},
         {HEROKU_HOST: 'api.heroku.test/path'},
+        {HEROKU_HOST: 'attacker.test'},
+        {HEROKU_HOST: 'https://api.heroku.com.attacker.test'},
+        {HEROKU_HOST: 'https://localhost.attacker.test'},
+        {HEROKU_HOST: 'https://api.heroku.com/path'},
         {HEROKU_LOGIN_HOST: 'ftp://login.heroku.test'},
         {SSO_URL: 'data:text/html,unsafe'},
       ]) {
@@ -369,6 +374,38 @@ describe('Login', function () {
         })).to.throw()
         expect(http.requests).to.deep.equal([])
         expect(saveAuth.notCalled).to.be.true
+      }
+    })
+
+    it('allows official Heroku domains and exact loopback HEROKU_HOST values', async function () {
+      for (const host of [
+        'staging.heroku.com',
+        'API.STAGING.HEROKU.COM',
+        'api.staging.herokai.com',
+        'staging.herokuspace.com',
+        'https://api.staging.herokudev.com:8443',
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'http://[::1]:3000',
+      ]) {
+        const fixture = loginFixture({config: {}, environment: environment({HEROKU_HOST: host})})
+        queueInteractive(fixture.http)
+        await fixture.login.login({method: 'interactive'})
+      }
+    })
+
+    it('lets explicit API configuration override disallowed ambient API destinations', async function () {
+      for (const values of [
+        {HEROKU_API_URL: 'https://attacker.test'},
+        {HEROKU_HOST: 'attacker.test'},
+      ]) {
+        const fixture = loginFixture({
+          config: {apiUrl: 'https://private.example.test'},
+          environment: environment(values),
+        })
+        queueInteractive(fixture.http)
+        await fixture.login.login({method: 'interactive'})
+        expect(fixture.http.requests[0].url).to.equal('https://private.example.test/oauth/authorizations')
       }
     })
   })

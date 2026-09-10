@@ -1,4 +1,10 @@
+import {createRequire} from 'node:module'
+
 import type {LoginHttp, LoginHttpRequest, LoginHttpResponse} from './types.js'
+
+const require = createRequire(import.meta.url)
+const packageMetadata = require('../../package.json') as {name: string, version: string}
+const USER_AGENT = `${packageMetadata.name}/${packageMetadata.version} node-${process.version}`
 
 type ErrorBody = {
   id?: unknown
@@ -230,13 +236,16 @@ export class FetchLoginHttp implements LoginHttp {
 
     try {
       const hasBody = options.body !== undefined
+      const hasUserAgent = Object.keys(options.headers ?? {}).some(header => header.toLowerCase() === 'user-agent')
       const response = await fetch(url, {
         body: hasBody ? JSON.stringify(options.body) : undefined,
         headers: {
           ...(hasBody ? {'content-type': 'application/json'} : {}),
+          ...(hasUserAgent ? {} : {'user-agent': USER_AGENT}),
           ...options.headers,
         },
         method: options.method,
+        redirect: 'error',
         signal: controller.signal,
       })
 

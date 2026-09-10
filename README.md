@@ -95,6 +95,8 @@ await login.logout(auth)
 
 `login()` supports `browser`, `interactive`, and `sso`, returns a persisted `{account, token}`, never revokes an existing session during re-login, and rejects cancellation with `LoginCancelledError` (`exitCode` is `130` for Ctrl-C and `0` for `q`). Browser and SSO flows always emit a manual URL; failure to open a browser does not invalidate that flow. The default storage adapter uses this package's native/`.netrc` APIs and writes login state only when native storage and `dataDir` are available. `logout(entry?)` always clears local API/Git credentials and login state, including when remote revocation fails.
 
+Environment-derived `HEROKU_HOST` and `HEROKU_API_URL` values are restricted to Heroku domains and exact loopback hosts. Consumers that intentionally target a private or custom HTTPS deployment must provide `config.apiUrl` explicitly; callers are responsible for treating that configuration as trusted. The default HTTP adapter rejects all redirects and identifies itself with a package-specific User-Agent. CLI adapters must preserve the CLI's existing host allowlist and warning/fallback behavior.
+
 ## Development
 
 ```bash

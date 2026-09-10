@@ -28,6 +28,7 @@ import {defaultLoginStorage} from './storage.js'
 const LOGIN_TIMEOUT = 10 * 60 * 1000
 const REDACTED_TOKEN_ASTERISKS = '*'.repeat(10)
 const METHODS = new Set<LoginMethod>(['browser', 'interactive', 'sso'])
+const ALLOWED_HEROKU_DOMAINS = ['heroku.com', 'herokai.com', 'herokuspace.com', 'herokudev.com']
 
 const defaultEnvironment: LoginEnvironment = {
   get: name => process.env[name],
@@ -80,6 +81,11 @@ function isLoopback(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '::1' || hostname === '[::1]' || /^127(?:\.\d{1,3}){3}$/.test(hostname)
 }
 
+function isAllowedHerokuHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase()
+  return isLoopback(normalized) || ALLOWED_HEROKU_DOMAINS.some(domain => normalized === domain || normalized.endsWith(`.${domain}`))
+}
+
 function safeUrl(value: string, description: string): URL {
   let url: URL
   try {
@@ -120,23 +126,33 @@ function urlHost(value: string, url: URL): string {
 
 function configuredApi(environment: LoginEnvironment): {apiUrl: string, gitHost?: string} {
   const configuredApiUrl = environment.get('HEROKU_API_URL')
-  if (configuredApiUrl) return {apiUrl: configuredApiUrl}
+  if (configuredApiUrl) {
+    const url = safeUrl(configuredApiUrl, 'HEROKU_API_URL')
+    if (!isAllowedHerokuHostname(url.hostname)) throw new Error('HEROKU_API_URL must use a Heroku or loopback host')
+    return {apiUrl: configuredApiUrl}
+  }
 
   const configuredHost = environment.get('HEROKU_HOST')
   if (!configuredHost) return {apiUrl: 'https://api.heroku.com', gitHost: 'git.heroku.com'}
   if (/^https?:\/\//i.test(configuredHost)) {
     const url = safeUrl(configuredHost, 'HEROKU_HOST')
+    if (url.pathname !== '/' || url.search || url.hash || !isAllowedHerokuHostname(url.hostname)) {
+      throw new Error('HEROKU_HOST must be a Heroku or loopback host without a path, query, or fragment')
+    }
+
     return {apiUrl: configuredHost, gitHost: urlHost(configuredHost, url)}
   }
 
-  const host = safeHost(configuredHost, 'HEROKU_HOST')
+  const host = safeHost(configuredHost.toLowerCase(), 'HEROKU_HOST')
+  const {hostname} = new URL(`https://${host}`)
+  if (!isAllowedHerokuHostname(hostname)) throw new Error('HEROKU_HOST must be a Heroku or loopback host')
   const baseHost = host.replace(/^api\./, '')
   return {apiUrl: `https://api.${baseHost}`, gitHost: `git.${baseHost}`}
 }
 
 function resolveConfig(config: LoginConfig, environment: LoginEnvironment): ResolvedConfig {
-  const api = configuredApi(environment)
-  const configuredApiUrl = config.apiUrl ?? api.apiUrl
+  const api = config.apiUrl === undefined ? configuredApi(environment) : {apiUrl: config.apiUrl}
+  const configuredApiUrl = api.apiUrl
   const parsedApiUrl = safeUrl(configuredApiUrl, 'apiUrl')
   const apiUrl = parsedApiUrl.href.replace(/\/$/, '')
   const loginHost = safeUrl(config.loginHost ?? environment.get('HEROKU_LOGIN_HOST') ?? 'https://cli-auth.heroku.com', 'loginHost').href.replace(/\/$/, '')

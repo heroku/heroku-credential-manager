@@ -3,7 +3,7 @@ import type {LoginStorage} from './types.js'
 import {
   deleteLoginState,
   getAuth,
-  getNativeCredentialStore,
+  getStorageConfig,
   readLoginState,
   removeAuth,
   saveAuth,
@@ -12,10 +12,10 @@ import {
 
 export const defaultLoginStorage: LoginStorage = {
   deleteLoginState,
-  getAuth,
-  hasNativeStorage: () => Boolean(getNativeCredentialStore()),
+  getAuth: (account, host, service) => getAuth(account, host, service),
+  hasNativeStorage: () => Boolean(getStorageConfig().credentialStore),
   readLoginState,
-  removeAuth,
-  saveAuth,
+  removeAuth: (account, hosts, service, expectedToken) => removeAuth(account, hosts, service, expectedToken),
+  saveAuth: (account, token, hosts, service) => saveAuth(account, token, hosts, service),
   writeLoginState,
 }

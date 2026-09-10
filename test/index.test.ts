@@ -322,7 +322,7 @@ describe('credential-manager', function () {
       expect(macosStub.firstCall.args[0]).to.equal('user@example.com')
       expect(macosStub.firstCall.args[1]).to.equal('heroku-cli')
       expect(netrcStub.calledOnce).to.be.true
-      expect(netrcStub.firstCall.args[0]).to.deep.equal(['api.heroku.com'])
+      expect(netrcStub.firstCall.args).to.deep.equal([['api.heroku.com'], 'user@example.com', undefined])
     })
 
     it('should remove from both stores even when HEROKU_NETRC_WRITE is true', async function () {
@@ -354,7 +354,11 @@ describe('credential-manager', function () {
 
       expect(macosStub.calledOnce).to.be.true
       expect(netrcStub.calledOnce).to.be.true
-      expect(netrcStub.firstCall.args[0]).to.deep.equal(['api.heroku.com', 'git.heroku.com'])
+      expect(netrcStub.firstCall.args).to.deep.equal([
+        ['api.heroku.com', 'git.heroku.com'],
+        'user@example.com',
+        undefined,
+      ])
     })
 
     it('should throw an error when netrc fails to remove', async function () {
@@ -384,6 +388,64 @@ describe('credential-manager', function () {
 
       expect(macosStub.notCalled).to.be.true
       expect(netrcStub.calledOnce).to.be.true
+      expect(netrcStub.firstCall.args).to.deep.equal([['api.heroku.com'], undefined, undefined])
+    })
+
+    it('should preserve a newer native token when expected token differs', async function () {
+      const getStub = sinon.stub(MacOSHandler.prototype, 'getAuth').returns('newer-token')
+      const removeStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').resolves()
+
+      await credentialManager.removeAuth('user@example.com', ['api.heroku.com'], 'heroku-cli', 'older-token')
+
+      expect(getStub.calledOnceWith('user@example.com', 'heroku-cli')).to.be.true
+      expect(removeStub.notCalled).to.be.true
+      expect(netrcStub.calledOnceWith(['api.heroku.com'], 'user@example.com', 'older-token')).to.be.true
+    })
+
+    it('should remove a native token matching the expected token', async function () {
+      const getStub = sinon.stub(MacOSHandler.prototype, 'getAuth').returns('token')
+      const removeStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').resolves()
+
+      await credentialManager.removeAuth('user@example.com', ['api.heroku.com'], 'custom-service', 'token')
+
+      expect(getStub.calledOnceWith('user@example.com', 'custom-service')).to.be.true
+      expect(removeStub.calledOnceWith('user@example.com', 'custom-service')).to.be.true
+      expect(netrcStub.calledOnceWith(['api.heroku.com'], 'user@example.com', 'token')).to.be.true
+    })
+
+    it('should treat a missing expected native token as an idempotent removal', async function () {
+      sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new NativeCredentialNotFoundError('Not found'))
+      const removeStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').resolves()
+
+      await credentialManager.removeAuth('user@example.com', ['api.heroku.com'], 'heroku-cli', 'token')
+
+      expect(removeStub.notCalled).to.be.true
+      expect(netrcStub.calledOnceWith(['api.heroku.com'], 'user@example.com', 'token')).to.be.true
+    })
+
+    it('should continue netrc cleanup when an expected native token read fails', async function () {
+      sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new Error('Keychain error'))
+      const removeStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').resolves()
+
+      await credentialManager.removeAuth('user@example.com', ['api.heroku.com'], 'heroku-cli', 'token')
+
+      expect(removeStub.notCalled).to.be.true
+      expect(netrcStub.calledOnceWith(['api.heroku.com'], 'user@example.com', 'token')).to.be.true
+    })
+
+    it('should not read native storage before unconditional removal', async function () {
+      const getStub = sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new Error('Keychain read error'))
+      const removeStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
+      sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').resolves()
+
+      await credentialManager.removeAuth('user@example.com', ['api.heroku.com'])
+
+      expect(getStub.notCalled).to.be.true
+      expect(removeStub.calledOnceWith('user@example.com', 'heroku-cli')).to.be.true
     })
   })
 

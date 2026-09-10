@@ -42,7 +42,7 @@ const auth = await getAuth('user@example.com', 'api.heroku.com')
 await removeAuth('user@example.com', ['api.heroku.com'])
 ```
 
-`saveAuth(account, token, hosts, service?)` stores the credential. `getAuth(account, host, service?)` returns the stored account and token; pass `undefined` for the account to read the host from `.netrc`. When an account is provided, a native miss falls back only to a matching `.netrc` login; native backend errors are surfaced. `removeAuth(account, hosts, service?)` removes the requested credential. The optional service defaults to `heroku-cli`.
+`saveAuth(account, token, hosts, service?)` stores the credential. `getAuth(account, host, service?)` returns the stored account and token; pass `undefined` for the account to read the host from `.netrc`. When an account is provided, a native miss falls back only to a matching `.netrc` login; native backend errors are surfaced. `removeAuth(account, hosts, service?, expectedToken?)` removes the requested credential. A supplied account guards `.netrc` removal so only entries with that login are eligible; `undefined` retains unconditional cleanup of the supplied hosts. The optional `expectedToken` is a best-effort conditional safeguard against deleting a replacement token, not a guarantee of atomic cross-process cleanup. The optional service defaults to `heroku-cli`.
 
 ### Storage behavior
 
@@ -68,7 +68,7 @@ try {
 }
 ```
 
-Top-level `removeAuth` removes the supplied `.netrc` hosts regardless of their stored login so logout can clean credentials after storage-mode changes.
+Top-level `removeAuth` uses a supplied account to guard `.netrc` entries by login. Passing `undefined` removes the supplied hosts regardless of stored login so callers can request unconditional host cleanup after storage-mode changes.
 
 ### Injected login consumers
 
@@ -93,9 +93,11 @@ const auth = await login.login({method: 'browser'})
 await login.logout(auth)
 ```
 
-`login()` supports `browser`, `interactive`, and `sso`, returns a persisted `{account, token}`, never revokes an existing session during re-login, and rejects cancellation with `LoginCancelledError` (`exitCode` is `130` for Ctrl-C and `0` for `q`). Browser and SSO flows always emit a manual URL; failure to open a browser does not invalidate that flow. The default storage adapter uses this package's native/`.netrc` APIs and writes login state only when native storage and `dataDir` are available. `logout(entry?)` always clears local API/Git credentials and login state, including when remote revocation fails.
+`login()` supports `browser`, `interactive`, and `sso`, returns a persisted `{account, token}`, never revokes an existing session during re-login, and rejects cancellation with `LoginCancelledError` (`exitCode` is `130` for Ctrl-C and `0` for `q`). Browser and SSO flows always emit a manual URL; failure to open a browser does not invalidate that flow. The default storage adapter uses this package's native/`.netrc` APIs. `logout(entry)` requires the returned credential entry and always attempts local API/Git credential cleanup, including when remote revocation fails. With the canonical `heroku-cli` credential service it also attempts configured login-state cleanup; isolated custom services intentionally skip the global `login.json` state. Backing-store failures can prevent guaranteed removal.
 
-Environment-derived `HEROKU_HOST` and `HEROKU_API_URL` values are restricted to Heroku domains and exact loopback hosts. Consumers that intentionally target a private or custom HTTPS deployment must provide `config.apiUrl` explicitly; callers are responsible for treating that configuration as trusted. The default HTTP adapter rejects all redirects and identifies itself with a package-specific User-Agent. CLI adapters must preserve the CLI's existing host allowlist and warning/fallback behavior.
+Environment-derived `HEROKU_HOST` and `HEROKU_API_URL` values are restricted to Heroku domains and exact loopback hosts. Consumers that intentionally target a private or custom HTTPS deployment must provide `config.apiUrl` explicitly; callers are responsible for treating endpoint configuration as trusted. Base `apiUrl` and `loginHost` values must not contain a query or fragment, while `ssoUrl` is a complete URL and may contain both. For an explicit custom `apiUrl` or `HEROKU_API_URL`, omitting `gitHost` avoids writing the API credential for any Git host; set a trusted `gitHost` explicitly to opt in. The canonical `api.heroku.com` endpoint uses the existing `heroku-cli` native credential service. Other API hosts derive an isolated `heroku-cli@<normalized-api-host>` service, including an explicit port, so custom native credentials do not collide with production. `config.credentialService` can override that namespace with a nonempty, NUL-free value. Any service other than `heroku-cli` skips the global `login.json` account-selection state to avoid cross-service state collisions. The default HTTP adapter rejects all redirects and identifies itself with a package-specific User-Agent. CLI adapters must preserve the CLI's existing host allowlist and warning/fallback behavior.
+
+`config.timeoutMs` limits login acquisition (10 minutes by default), but does not cancel credential persistence after credentials have been acquired. For logout, the same timeout is the remote-revocation deadline: it aborts remote requests, while already-started local credential and login-state cleanup is awaited because those operations are not cancellable. Logout therefore has no overall time bound and remains pending indefinitely if local cleanup never settles. Cleanup passes the logged-out token as `expectedToken` as defense in depth, but this conditional check does not guarantee cross-process race safety. `config.requestTimeoutMs` separately limits each HTTP request. In forced-netrc mode (`HEROKU_NETRC_WRITE=true`), login credentials persist only to `.netrc`, interactive login prefills the account from the API host's `.netrc` entry, and login does not read or write native `login.json` state even when a native credential backend is installed. Logout and top-level `removeAuth` may still attempt OS-native cleanup so credentials left by an earlier storage mode do not remain stale.
 
 ## Development
 
@@ -108,7 +110,7 @@ npm run unit
 npm run test:package
 ```
 
-`npm run test:package` verifies the packed tarball in an isolated consumer project without accessing the user's real credential files.
+`npm run test:package` verifies the packed tarball in isolated runtime and type-checking consumer projects. It uses an isolated home directory so the exercised netrc and login-state paths avoid the user's normal credential files, and verifies that the root runtime entry point does not pull in the separately exported login implementation or its framework/browser dependency concerns.
 
 ## License
 

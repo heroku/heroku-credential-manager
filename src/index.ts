@@ -114,23 +114,33 @@ export async function listKeychainAccounts(service = SERVICE_NAME): Promise<stri
  * @param account - User's account (email), or undefined when native removal should be skipped
  * @param hosts - Hostname(s) for netrc storage (e.g., ['api.heroku.com'])
  * @param service - Service name (defaults to 'heroku-cli')
+ * @param expectedToken - Optional token that existing credentials must exactly match
  * @returns Promise that resolves when credentials are removed
  */
-export async function removeAuth(account: string | undefined, hosts: string[], service = SERVICE_NAME): Promise<void> {
+export async function removeAuth(
+  account: string | undefined,
+  hosts: string[],
+  service = SERVICE_NAME,
+  expectedToken?: string,
+): Promise<void> {
   const netrcHandler = new NetrcHandler()
   const nativeStore = getNativeCredentialStore()
 
   if (nativeStore && account) {
     try {
       const handler = getCredentialHandler(nativeStore)
-      handler.removeAuth(account, service)
-    } catch {
-      credDebug('native credential store failed during removeAuth; continuing netrc cleanup')
+      if (expectedToken === undefined || handler.getAuth(account, service) === expectedToken) {
+        handler.removeAuth(account, service)
+      }
+    } catch (error) {
+      if (!(error instanceof NativeCredentialNotFoundError)) {
+        credDebug('native credential store failed during removeAuth; continuing netrc cleanup')
+      }
     }
   }
 
   if (hosts.length > 0) {
-    await netrcHandler.removeAuthForHosts(hosts)
+    await netrcHandler.removeAuthForHosts(hosts, account, expectedToken)
   }
 }
 

@@ -218,7 +218,7 @@ const storage: StorageConfig = {credentialStore: null, useNetrc: true}
 const method: LoginMethod = 'browser'
 const options: LoginOptions = {method}
 const result: LoginResult = auth
-const config: LoginConfig = {apiUrl: 'https://api.heroku.com'}
+const config: LoginConfig = {apiUrl: 'https://api.heroku.com', credentialService: 'package-fixture-service'}
 const request: LoginHttpRequest = {method: 'GET'}
 const response: LoginHttpResponse<unknown> = {body: {}, headers: {}, ok: true, status: 200}
 const selection: LoginPromptSelection = {cancelled: 'quit'}
@@ -235,9 +235,23 @@ const browser: LoginBrowser = {async open() {}}
 const output: LoginOutput = {warn() {}, write() {}}
 const progress: LoginProgress = {start() {}, stop() {}}
 const environment: LoginEnvironment = {get() { return undefined }}
-const timers = null as unknown as LoginTimers
-const loginStorage = null as unknown as LoginStorage
+const timers: LoginTimers = {
+  clearTimeout() {},
+  setTimeout() { return {} },
+}
+const loginStorage: LoginStorage = {
+  async deleteLoginState() {},
+  async getAuth(account, host, service) { void [account, host, service]; return auth },
+  hasNativeStorage() { return false },
+  async readLoginState() { return undefined },
+  async removeAuth(account, hosts, service, expectedToken) { void [account, hosts, service, expectedToken] },
+  async saveAuth(account, token, hosts, service) { void [account, token, hosts, service] },
+  async writeLoginState() {},
+}
 const login = new Login({browser, config, environment, http, output, progress, prompt})
+void login.logout(auth)
+// @ts-expect-error logout requires the credential entry to remove
+void login.logout()
 const cancelled = new LoginCancelledError('quit')
 const httpError = new LoginHttpError(401, {id: 'unauthorized'})
 
@@ -288,11 +302,11 @@ const fakePrompt = {
 }
 const fakeStorage = {
   async deleteLoginState() {},
-  async getAuth() { throw new Error('not executed') },
+  async getAuth(account, host, service) { void [account, host, service]; throw new Error('not executed') },
   hasNativeStorage() { return false },
   async readLoginState() {},
-  async removeAuth() {},
-  async saveAuth() {},
+  async removeAuth(account, hosts, service, expectedToken) { void [account, hosts, service, expectedToken] },
+  async saveAuth(account, token, hosts, service) { void [account, token, hosts, service] },
   async writeLoginState() {},
 }
 const login = new loginModule.Login({http: fakeHttp, prompt: fakePrompt, storage: fakeStorage})
@@ -315,6 +329,56 @@ assert.equal(path.relative(temporaryRoot, netrcPath).startsWith('..'), false)
 assert.deepEqual(await credentialManager.getAuth(account, host), {account, token})
 await credentialManager.removeAuth(account, [host])
 await assert.rejects(credentialManager.getAuth(account, host), /No auth found|No credentials found/)
+
+const dataDir = path.join(temporaryRoot, 'login-data')
+const staleAccount = 'stale-native@example.com'
+const netrcAccount = 'netrc-prefill@example.com'
+const loginToken = 'packed-login-token'
+await credentialManager.writeLoginState(dataDir, staleAccount)
+await credentialManager.saveAuth(netrcAccount, 'old-netrc-token', ['api.heroku.com'])
+let previousAccount
+const packedPrompt = {
+  async accessToken() { return 'unused' },
+  async email(previous) { previousAccount = previous; return netrcAccount },
+  async loginMethod() { return {method: 'browser'} },
+  async organization() { return 'unused' },
+  async password() { return 'packed-password' },
+  async secondFactor() { return 'unused' },
+}
+const packedHttp = {
+  async request(url, options) {
+    if (options.method === 'POST' && url.endsWith('/oauth/authorizations')) {
+      return {
+        body: {access_token: {token: loginToken}, user: {email: netrcAccount}},
+        headers: {},
+        ok: true,
+        status: 200,
+      }
+    }
+
+    if (options.method === 'DELETE' && url.endsWith('/oauth/sessions/~')) {
+      return {body: {id: 'not_found', resource: 'session'}, headers: {}, ok: false, status: 404}
+    }
+
+    if (options.method === 'GET' && url.endsWith('/oauth/authorizations')) {
+      return {body: {id: 'unauthorized'}, headers: {}, ok: false, status: 401}
+    }
+
+    throw new Error(\`Unexpected packed login request: \${options.method} \${url}\`)
+  },
+}
+const packedLogin = new loginModule.Login({
+  config: {dataDir},
+  http: packedHttp,
+  prompt: packedPrompt,
+})
+const packedAuth = await packedLogin.login({method: 'interactive'})
+assert.equal(previousAccount, netrcAccount)
+assert.deepEqual(packedAuth, {account: netrcAccount, token: loginToken})
+assert.deepEqual(await credentialManager.readLoginState(dataDir), {account: staleAccount})
+assert.deepEqual(await credentialManager.getAuth(netrcAccount, 'api.heroku.com'), packedAuth)
+await packedLogin.logout(packedAuth)
+await assert.rejects(credentialManager.getAuth(undefined, 'api.heroku.com'), /No auth found|No credentials found/)
 `)
   execFileSync(process.execPath, ['runtime.mjs'], {
     cwd: consumerDirectory,

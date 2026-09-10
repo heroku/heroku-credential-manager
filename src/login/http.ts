@@ -76,9 +76,18 @@ function bodyMessage(body: unknown): string | undefined {
   if (usefulId) return `Error ID: ${usefulId}`
 }
 
+/**
+ * Public error for an unsuccessful login HTTP response.
+ *
+ * Its body is limited to safe Heroku error fields (`id`, `message`, and `resource`),
+ * and known credentials are scrubbed from both the body and message.
+ */
 export class LoginHttpError extends Error {
+  /** Sanitized response error fields, when provided by the server. */
   body?: LoginHttpErrorBody
+  /** Heroku error identifier, when present. */
   id?: string
+  /** HTTP response status code. */
   status: number
 
   constructor(status: number, body?: unknown, message?: string, sensitiveValues: readonly string[] = []) {

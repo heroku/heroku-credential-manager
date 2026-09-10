@@ -17,7 +17,8 @@ export class NetrcHandler {
   /**
    * Retrieves authentication credentials for a given host.
    * @param host - The hostname to retrieve credentials for.
-   * @returns The authentication entry for the host, or undefined if not found.
+   * @returns The authentication entry for the host.
+   * @throws An error when no credentials exist for the host.
    */
   public async getAuth(host: string) {
     await this.netrc.load()
@@ -33,27 +34,31 @@ export class NetrcHandler {
    * Removes authentication credentials for a given host.
    * @param host - The hostname to remove credentials for.
    * @param account - Optional login that existing credentials must exactly match.
+   * @param expectedPassword - Optional password that existing credentials must exactly match.
    * @returns A promise that resolves when removal is complete.
    */
-  public async removeAuth(host: string, account?: string) {
-    await this.removeAuthForHosts([host], account)
+  public async removeAuth(host: string, account?: string, expectedPassword?: string) {
+    await this.removeAuthForHosts([host], account, expectedPassword)
   }
 
   /**
    * Removes credentials for multiple hosts with a single netrc load/save.
-   * Only entries with an exactly matching login are removed when account is defined.
+   * Only entries matching every supplied condition are removed.
    * @param hosts - The hostnames to remove credentials for.
    * @param account - Optional login that existing credentials must exactly match.
+   * @param expectedPassword - Optional password that existing credentials must exactly match.
    * @returns A promise that resolves when removal is complete.
    */
-  public async removeAuthForHosts(hosts: string[], account?: string) {
+  public async removeAuthForHosts(hosts: string[], account?: string, expectedPassword?: string) {
     if (hosts.length === 0) return
     this.validateHosts(hosts, 'remove')
     await this.netrc.load()
     let changed = false
     for (const host of hosts) {
       const machine = this.netrc.machines[host]
-      if (!machine || (account !== undefined && machine.login !== account)) {
+      if (!machine
+        || (account !== undefined && machine.login !== account)
+        || (expectedPassword !== undefined && machine.password !== expectedPassword)) {
         credDebug(`No credentials to logout for ${host}`)
         continue
       }

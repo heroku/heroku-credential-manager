@@ -172,6 +172,65 @@ machine missing.heroku.com password missing-login-token
       expect(handler.netrc.machines['missing.heroku.com'].login).to.be.undefined
     })
 
+    it('removeAuthForHosts preserves a matching account with a different password', async function () {
+      let saveCalls = 0
+      const handler = new NetrcHandler(netrcPath)
+      handler.netrc.load = async () => {
+        handler.netrc.machines = parse('machine api.heroku.com login u@e.com password newer-token\n')
+      }
+
+      handler.netrc.save = async () => {
+        saveCalls++
+      }
+
+      await handler.removeAuthForHosts(['api.heroku.com'], 'u@e.com', 'older-token')
+      expect(saveCalls).to.equal(0)
+      expect(handler.netrc.machines['api.heroku.com']).to.deep.equal({login: 'u@e.com', password: 'newer-token'})
+    })
+
+    it('removeAuthForHosts removes an entry matching both account and password', async function () {
+      let saveCalls = 0
+      const handler = new NetrcHandler(netrcPath)
+      handler.netrc.load = async () => {
+        handler.netrc.machines = parse('machine api.heroku.com login u@e.com password token\n')
+      }
+
+      handler.netrc.save = async () => {
+        saveCalls++
+      }
+
+      await handler.removeAuthForHosts(['api.heroku.com'], 'u@e.com', 'token')
+      expect(saveCalls).to.equal(1)
+      expect(handler.netrc.machines['api.heroku.com']).to.be.undefined
+    })
+
+    it('removeAuthForHosts supports password-only conditional removal', async function () {
+      const handler = new NetrcHandler(netrcPath)
+      handler.netrc.load = async () => {
+        handler.netrc.machines = parse(`machine matching.heroku.com login first@e.com password token
+machine different.heroku.com login second@e.com password newer-token
+`)
+      }
+
+      handler.netrc.save = async () => {}
+
+      await handler.removeAuthForHosts(['matching.heroku.com', 'different.heroku.com'], undefined, 'token')
+      expect(handler.netrc.machines['matching.heroku.com']).to.be.undefined
+      expect(handler.netrc.machines['different.heroku.com']).to.deep.equal({login: 'second@e.com', password: 'newer-token'})
+    })
+
+    it('removeAuthForHosts remains unconditional when account and password are undefined', async function () {
+      const handler = new NetrcHandler(netrcPath)
+      handler.netrc.load = async () => {
+        handler.netrc.machines = parse('machine api.heroku.com login any@e.com password any-token\n')
+      }
+
+      handler.netrc.save = async () => {}
+
+      await handler.removeAuthForHosts(['api.heroku.com'])
+      expect(handler.netrc.machines['api.heroku.com']).to.be.undefined
+    })
+
     for (const hosts of [[''], ['   '], ['a.com', 'bad host'], ['bad\0host']]) {
       it(`removeAuthForHosts rejects invalid hosts ${JSON.stringify(hosts)} before loading netrc`, async function () {
         let loadCalls = 0

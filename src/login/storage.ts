@@ -12,10 +12,10 @@ import {
 
 export const defaultLoginStorage: LoginStorage = {
   deleteLoginState,
-  getAuth: (account, host, service) => getAuth(account, host, service),
+  getAuth,
   hasNativeStorage: () => Boolean(getStorageConfig().credentialStore),
   readLoginState,
-  removeAuth: (account, hosts, service, expectedToken) => removeAuth(account, hosts, service, expectedToken),
-  saveAuth: (account, token, hosts, service) => saveAuth(account, token, hosts, service),
+  removeAuth,
+  saveAuth,
   writeLoginState,
 }

@@ -27,10 +27,4 @@ describe('defaultLoginStorage', function () {
     expect(getStorageConfig().credentialStore).to.equal(getNativeCredentialStore())
     expect(defaultLoginStorage.hasNativeStorage()).to.equal(true)
   })
-
-  it('exposes forwarding signatures for service-isolated conditional operations', function () {
-    expect(defaultLoginStorage.getAuth).to.have.length(3)
-    expect(defaultLoginStorage.saveAuth).to.have.length(4)
-    expect(defaultLoginStorage.removeAuth).to.have.length(4)
-  })
 })

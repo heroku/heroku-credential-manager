@@ -217,7 +217,10 @@ describe('credential manager Phase 1 acceptance', function () {
 
       await assert.rejects(safeGet(fixture.account, fixture.hosts[0], fixture.service), /Failed to retrieve token/)
 
-      await safeRemove(fixture.account, fixture.hosts, fixture.service)
+      await assert.rejects(
+        safeRemove(fixture.account, fixture.hosts, fixture.service),
+        /Failed to remove token/,
+      )
       fakeCredentialStore.assertShadowed()
       const machines = await loadIsolatedNetrc()
       for (const host of fixture.hosts) assert.equal(machines[host], undefined)

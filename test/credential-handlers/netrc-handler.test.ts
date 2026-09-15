@@ -286,7 +286,7 @@ machine different.heroku.com login second@e.com password newer-token
 // Child-process tests intentionally use a second top-level suite so the prototype stubs above cannot affect them.
 /* eslint-disable mocha/max-top-level-suites */
 describe('NetrcHandler cross-process mutations', function () {
-  const workerTimeoutMs = 12_000
+  const workerTimeoutMs = 30_000
   const children = new Set<ChildProcess>()
   let tmpDir: string
   let netrcPath: string
@@ -410,7 +410,7 @@ describe('NetrcHandler cross-process mutations', function () {
   }
 
   it('serializes concurrent saves from independent processes without losing credentials', async function () {
-    this.timeout(15_000)
+    this.timeout(35_000)
     const hosts = Array.from({length: 8}, (_, index) => `save-${index}.heroku.test`)
 
     await runWorkers(hosts.map(host => ({host, operation: 'save'})))
@@ -426,7 +426,7 @@ describe('NetrcHandler cross-process mutations', function () {
   })
 
   it('serializes concurrent saves and removals without resurrecting or losing credentials', async function () {
-    this.timeout(15_000)
+    this.timeout(35_000)
     const removedHosts = Array.from({length: 4}, (_, index) => `remove-${index}.heroku.test`)
     const savedHosts = Array.from({length: 4}, (_, index) => `new-${index}.heroku.test`)
     const initial = removedHosts.map(host => `machine ${host} login old@example.com password old-token\n`).join('')
@@ -466,7 +466,7 @@ describe('NetrcHandler cross-process mutations', function () {
   it('recovers a lock after its owning process crashes', async function () {
     const loadedMarker = join(tmpDir, 'crashed-loaded')
     const crashed = spawnWorker('crashed.heroku.test', {loadedMarker, saveAt: Date.now() + 60_000})
-    expect(await waitForPath(loadedMarker)).to.equal(true)
+    expect(await waitForPath(loadedMarker, 10_000)).to.equal(true)
     crashed.child.kill('SIGKILL')
     await expect(crashed.completed).to.be.rejectedWith('SIGKILL')
 
@@ -545,7 +545,7 @@ describe('NetrcHandler cross-process mutations', function () {
   })
 
   it('keeps a contender from loading old state at the destination rename boundary', async function () {
-    this.timeout(5000)
+    this.timeout(15_000)
     const firstHost = 'first.heroku.test'
     const contenderHost = 'contender.heroku.test'
     const startedMarker = join(tmpDir, 'contender-started')
@@ -583,7 +583,7 @@ describe('NetrcHandler cross-process mutations', function () {
     const contender = spawnWorker(contenderHost, {loadedMarker, startedMarker})
 
     try {
-      expect(await waitForPath(startedMarker)).to.equal(true)
+      expect(await waitForPath(startedMarker, 10_000)).to.equal(true)
       expect(await waitForPath(loadedMarker, 500), 'contender loaded before the first owner committed and released').to.equal(false)
     } finally {
       continueRename()

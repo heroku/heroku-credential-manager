@@ -38,3 +38,4 @@ if (operation === 'save') {
 }
 
 reportActiveResources('released')
+process.exit(0)

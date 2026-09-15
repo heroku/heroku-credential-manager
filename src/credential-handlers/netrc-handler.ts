@@ -1,10 +1,350 @@
 import debug from 'debug'
+import {randomUUID} from 'node:crypto'
+import fs from 'node:fs'
+import os from 'node:os'
+import {setTimeout as delay} from 'node:timers/promises'
 
 import type {NetrcAuthEntry} from '../lib/types.js'
 
 import {Netrc} from '../lib/netrc-parser.js'
 
 const credDebug = debug('heroku-credential-manager')
+const lockPollMs = 50
+const lockStaleMs = 30_000
+const lockTimeoutMs = 10_000
+const ownerFileName = 'owner.json'
+const activeNonces = new Set<string>()
+const processStartedAt = Date.now() - (process.uptime() * 1000)
+
+type LockOwner = {
+  createdAt: number
+  hostname: string
+  nonce: string
+  pid: number
+  processStartedAt?: number
+}
+
+type FileIdentity = {
+  birthtimeMs: number
+  dev: number
+  ino: number
+  mode: number
+}
+
+type LockObservation = {
+  identity: FileIdentity
+  kind: 'directory' | 'file'
+  owner?: LockOwner
+  ownerIdentity?: FileIdentity
+  updatedAt: number
+}
+
+type MutationLock = {
+  assertOwned(): Promise<void>
+  release(): Promise<void>
+}
+
+/** Test-only interleaving controls; consumers should not depend on these hooks. */
+export const netrcLockTestHooks: {
+  beforeOwnerCreate?: (lockPath: string) => Promise<void>
+  beforeOwnershipCheck?: (lockPath: string) => Promise<void>
+  beforeQuarantine?: (lockPath: string, reason: 'release' | 'setup' | 'stale') => Promise<void>
+  lockTimeoutMs?: number
+} = {}
+
+function noFollowFlag(): number {
+  return process.platform === 'win32' ? 0 : fs.constants.O_NOFOLLOW ?? 0
+}
+
+function isFileSystemError(error: unknown, code: string): boolean {
+  return error instanceof Error && 'code' in error && error.code === code
+}
+
+function identity(stats: fs.Stats): FileIdentity {
+  return {
+    birthtimeMs: stats.birthtimeMs, dev: stats.dev, ino: stats.ino, mode: stats.mode,
+  }
+}
+
+function sameIdentity(left: FileIdentity | undefined, right: FileIdentity | undefined): boolean {
+  if (!left || !right) return left === right
+  if (left.ino !== 0 || right.ino !== 0) return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
+  return left.birthtimeMs === right.birthtimeMs && left.mode === right.mode
+}
+
+function validOwner(value: Partial<LockOwner>, now = Date.now()): value is LockOwner {
+  return Number.isFinite(value.createdAt)
+    && value.createdAt! > 0
+    && value.createdAt! <= now + 60_000
+    && typeof value.hostname === 'string'
+    && value.hostname.length > 0
+    && value.hostname.length <= 255
+    && !value.hostname.includes('\0')
+    && typeof value.nonce === 'string'
+    && value.nonce.length > 0
+    && value.nonce.length <= 255
+    && !value.nonce.includes('\0')
+    && Number.isSafeInteger(value.pid)
+    && value.pid! > 0
+    && (value.processStartedAt === undefined
+      || (Number.isFinite(value.processStartedAt) && value.processStartedAt! > 0 && value.processStartedAt! <= now + 60_000))
+}
+
+async function readLockOwner(lockPath: string): Promise<LockObservation> {
+  const lockStats = await fs.promises.lstat(lockPath)
+  if (lockStats.isSymbolicLink()) throw new Error(`Refusing to use symlinked netrc lock: ${lockPath}`)
+  if (lockStats.isFile()) {
+    let handle: fs.promises.FileHandle | undefined
+    try {
+      // eslint-disable-next-line no-bitwise
+      handle = await fs.promises.open(lockPath, fs.constants.O_RDONLY | noFollowFlag())
+      const stats = await handle.stat()
+      if (!stats.isFile()) throw new Error(`Refusing to read non-regular netrc lock owner: ${lockPath}`)
+      if (stats.size > 4096) return {identity: identity(lockStats), kind: 'file', updatedAt: stats.mtimeMs}
+      let parsed: Partial<LockOwner> = {}
+      try {
+        parsed = JSON.parse(await handle.readFile('utf8')) as Partial<LockOwner>
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error
+      }
+
+      return {
+        identity: identity(lockStats),
+        kind: 'file',
+        owner: validOwner(parsed) ? parsed : undefined,
+        ownerIdentity: identity(stats),
+        updatedAt: stats.mtimeMs,
+      }
+    } finally {
+      await handle?.close()
+    }
+  }
+
+  if (!lockStats.isDirectory()) throw new Error(`Refusing to use non-file netrc lock: ${lockPath}`)
+
+  const ownerPath = `${lockPath}/${ownerFileName}`
+  let handle: fs.promises.FileHandle | undefined
+  try {
+    // eslint-disable-next-line no-bitwise
+    handle = await fs.promises.open(ownerPath, fs.constants.O_RDONLY | noFollowFlag())
+    const stats = await handle.stat()
+    if (!stats.isFile()) throw new Error(`Refusing to read non-regular netrc lock owner: ${ownerPath}`)
+    if (stats.size > 4096) return {identity: identity(lockStats), kind: 'directory', updatedAt: stats.mtimeMs}
+    let parsed: Partial<LockOwner> = {}
+
+    try {
+      parsed = JSON.parse(await handle.readFile('utf8')) as Partial<LockOwner>
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error
+    }
+
+    const owner = validOwner(parsed) ? parsed : undefined
+    return {
+      identity: identity(lockStats), kind: 'directory', owner, ownerIdentity: identity(stats), updatedAt: stats.mtimeMs,
+    }
+  } catch (error) {
+    if (!isFileSystemError(error, 'ENOENT')) throw error
+    return {identity: identity(lockStats), kind: 'directory', updatedAt: lockStats.mtimeMs}
+  } finally {
+    await handle?.close()
+  }
+}
+
+function processIsRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return !isFileSystemError(error, 'ESRCH')
+  }
+}
+
+function lockCanBeReclaimed(observed: LockObservation): boolean {
+  const {kind, owner, updatedAt} = observed
+  if (!owner) {
+    // Current package versions atomically publish a complete regular-file owner. Only an old
+    // directory can therefore be incomplete setup rather than an active registered owner.
+    return kind === 'directory' && Date.now() - updatedAt >= lockStaleMs
+  }
+
+  if (owner.hostname !== os.hostname()) return false
+  if (owner.pid === process.pid) {
+    const belongsToThisProcess = owner.processStartedAt !== undefined
+      && Math.abs(owner.processStartedAt - processStartedAt) < 1000
+    return belongsToThisProcess
+      && Date.now() - Math.max(updatedAt, owner.createdAt) >= lockStaleMs
+      && !activeNonces.has(owner.nonce)
+  }
+
+  // A live PID may be the owner or a reused PID. In either case it is not safe to steal.
+  return !processIsRunning(owner.pid)
+}
+
+async function removeQuarantinedLock(quarantinePath: string): Promise<void> {
+  try {
+    const stats = await fs.promises.lstat(quarantinePath)
+    if (stats.isFile()) {
+      await fs.promises.unlink(quarantinePath)
+      return
+    }
+
+    if (!stats.isDirectory()) throw new Error(`Refusing to remove non-file netrc lock: ${quarantinePath}`)
+    const entries = await fs.promises.readdir(quarantinePath)
+    if (entries.some(entry => entry !== ownerFileName)) {
+      throw new Error(`Refusing to remove netrc lock with unexpected contents: ${quarantinePath}`)
+    }
+
+    if (entries.includes(ownerFileName)) await fs.promises.unlink(`${quarantinePath}/${ownerFileName}`)
+    await fs.promises.rmdir(quarantinePath)
+  } catch (error) {
+    if (isFileSystemError(error, 'ENOENT')) return
+    throw error
+  }
+}
+
+async function quarantineObservedLock(
+  lockPath: string,
+  observed: LockObservation,
+  reason: 'release' | 'setup' | 'stale',
+): Promise<boolean> {
+  await netrcLockTestHooks.beforeQuarantine?.(lockPath, reason)
+  let current: LockObservation
+  try {
+    current = await readLockOwner(lockPath)
+  } catch (error) {
+    if (isFileSystemError(error, 'ENOENT')) return false
+    throw error
+  }
+
+  if (!sameIdentity(current.identity, observed.identity)
+    || !sameIdentity(current.ownerIdentity, observed.ownerIdentity)
+    || current.owner?.nonce !== observed.owner?.nonce) return false
+
+  const quarantinePath = `${lockPath}.quarantine.${process.pid}.${randomUUID()}`
+  try {
+    await fs.promises.rename(lockPath, quarantinePath)
+  } catch (error) {
+    if (isFileSystemError(error, 'ENOENT')) return false
+    throw error
+  }
+
+  const quarantined = await readLockOwner(quarantinePath)
+  if (!sameIdentity(quarantined.identity, observed.identity)
+    || !sameIdentity(quarantined.ownerIdentity, observed.ownerIdentity)
+    || quarantined.owner?.nonce !== observed.owner?.nonce) {
+    try {
+      await fs.promises.rename(quarantinePath, lockPath)
+    } catch {
+      // Never delete an object that did not match the observed lock. A unique quarantine is safer to leave behind.
+    }
+
+    return false
+  }
+
+  await removeQuarantinedLock(quarantinePath)
+  return true
+}
+
+async function acquireLock(file: string): Promise<MutationLock> {
+  const lockPath = `${file}.lock`
+  const startedAt = Date.now()
+  // A hard link publishes complete owner metadata and claims the canonical path in one atomic,
+  // no-replace operation. Cooperating contenders never replace a registered owner based on age.
+  /* eslint-disable no-await-in-loop, no-constant-condition */
+  while (true) {
+    const owner: LockOwner = {
+      createdAt: Date.now(),
+      hostname: os.hostname(),
+      nonce: randomUUID(),
+      pid: process.pid,
+      processStartedAt,
+    }
+    const candidatePath = `${lockPath}.owner.${process.pid}.${owner.nonce}.tmp`
+    let ownerHandle: fs.promises.FileHandle | undefined
+    let published = false
+    try {
+      // eslint-disable-next-line no-bitwise
+      ownerHandle = await fs.promises.open(candidatePath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | noFollowFlag(), 0o600)
+      await ownerHandle.writeFile(JSON.stringify(owner))
+      await ownerHandle.sync()
+      await ownerHandle.close()
+      ownerHandle = undefined
+      await netrcLockTestHooks.beforeOwnerCreate?.(candidatePath)
+      await fs.promises.link(candidatePath, lockPath)
+      published = true
+      activeNonces.add(owner.nonce)
+      const acquired = await readLockOwner(lockPath)
+      if (acquired.kind !== 'file' || acquired.owner?.nonce !== owner.nonce) {
+        throw new Error(`Netrc lock ownership was compromised during acquisition: ${lockPath}`)
+      }
+
+      const assertOwned = async () => {
+        await netrcLockTestHooks.beforeOwnershipCheck?.(lockPath)
+        const current = await readLockOwner(lockPath)
+        if (!sameIdentity(current.identity, acquired.identity)
+          || !sameIdentity(current.ownerIdentity, acquired.ownerIdentity)
+          || current.owner?.nonce !== owner.nonce
+          || !activeNonces.has(owner.nonce)) {
+          throw new Error(`Netrc lock ownership was lost: ${lockPath}`)
+        }
+      }
+
+      let released = false
+      return {
+        assertOwned,
+        async release() {
+          if (released) return
+          released = true
+          try {
+            const removed = await quarantineObservedLock(lockPath, acquired, 'release')
+            if (!removed) throw new Error(`Netrc lock ownership was lost before release: ${lockPath}`)
+          } finally {
+            activeNonces.delete(owner.nonce)
+          }
+        },
+      }
+    } catch (error) {
+      if (published) {
+        activeNonces.delete(owner.nonce)
+        try {
+          const observed = await readLockOwner(lockPath)
+          if (observed.owner?.nonce === owner.nonce) await quarantineObservedLock(lockPath, observed, 'setup')
+        } catch (cleanupError) {
+          throw new AggregateError([error, cleanupError], 'Failed to initialize and clean up netrc lock', {cause: error})
+        }
+      }
+
+      if (!isFileSystemError(error, 'EEXIST')) throw error
+    } finally {
+      await ownerHandle?.close()
+      try {
+        await fs.promises.unlink(candidatePath)
+      } catch (error) {
+        // Candidate cleanup must not hide an acquisition/release error, but a standalone cleanup
+        // failure is still actionable and must not be silently ignored.
+        // eslint-disable-next-line no-unsafe-finally
+        if (!isFileSystemError(error, 'ENOENT')) throw error
+      }
+    }
+
+    let observed: LockObservation
+    try {
+      observed = await readLockOwner(lockPath)
+    } catch (error) {
+      if (isFileSystemError(error, 'ENOENT')) continue
+      throw error
+    }
+
+    if (lockCanBeReclaimed(observed) && await quarantineObservedLock(lockPath, observed, 'stale')) continue
+
+    if (Date.now() - startedAt >= (netrcLockTestHooks.lockTimeoutMs ?? lockTimeoutMs)) {
+      throw new Error(`Timed out waiting for netrc lock: ${lockPath}`)
+    }
+
+    await delay(lockPollMs + Math.floor(Math.random() * lockPollMs))
+  }
+  /* eslint-enable no-await-in-loop, no-constant-condition */
+}
 
 export class NetrcHandler {
   public readonly netrc: Netrc
@@ -52,22 +392,24 @@ export class NetrcHandler {
   public async removeAuthForHosts(hosts: string[], account?: string, expectedPassword?: string) {
     if (hosts.length === 0) return
     this.validateHosts(hosts, 'remove')
-    await this.netrc.load()
-    let changed = false
-    for (const host of hosts) {
-      const machine = this.netrc.machines[host]
-      if (!machine
-        || (account !== undefined && machine.login !== account)
-        || (expectedPassword !== undefined && machine.password !== expectedPassword)) {
-        credDebug(`No credentials to logout for ${host}`)
-        continue
+    await this.withMutationLock(async assertOwned => {
+      await this.netrc.load()
+      let changed = false
+      for (const host of hosts) {
+        const machine = this.netrc.machines[host]
+        if (!machine
+          || (account !== undefined && machine.login !== account)
+          || (expectedPassword !== undefined && machine.password !== expectedPassword)) {
+          credDebug(`No credentials to logout for ${host}`)
+          continue
+        }
+
+        delete this.netrc.machines[host]
+        changed = true
       }
 
-      delete this.netrc.machines[host]
-      changed = true
-    }
-
-    if (changed) await this.netrc.save()
+      if (changed) await this.netrc.save(assertOwned)
+    })
   }
 
   /**
@@ -89,12 +431,14 @@ export class NetrcHandler {
   public async saveAuthForHosts(auth: NetrcAuthEntry, hosts: string[]) {
     this.validateHosts(hosts, 'save', true)
 
-    await this.netrc.load()
-    for (const host of hosts) {
-      this.applyAuthToHost(auth, host)
-    }
+    await this.withMutationLock(async assertOwned => {
+      await this.netrc.load()
+      for (const host of hosts) {
+        this.applyAuthToHost(auth, host)
+      }
 
-    await this.netrc.save()
+      await this.netrc.save(assertOwned)
+    })
   }
 
   private applyAuthToHost(auth: NetrcAuthEntry, host: string) {
@@ -120,5 +464,38 @@ export class NetrcHandler {
       const preposition = operation === 'save' ? 'to' : 'from'
       throw new Error(`Cannot ${operation} credentials ${preposition} netrc: provide at least one valid, non-empty host`)
     }
+  }
+
+  private async validateNetrcTarget(): Promise<void> {
+    try {
+      const stats = await fs.promises.lstat(this.netrc.file)
+      if (!stats.isFile()) throw new Error(`Refusing to mutate non-regular netrc file: ${this.netrc.file}`)
+    } catch (error) {
+      if (!isFileSystemError(error, 'ENOENT')) throw error
+    }
+  }
+
+  private async withMutationLock(operation: (assertOwned: () => Promise<void>) => Promise<void>): Promise<void> {
+    const lock = await acquireLock(this.netrc.file)
+    let operationFailure: unknown
+    let operationFailed = false
+    try {
+      await this.validateNetrcTarget()
+      await operation(() => lock.assertOwned())
+    } catch (error) {
+      operationFailed = true
+      operationFailure = error
+    }
+
+    try {
+      await lock.release()
+    } catch (releaseError) {
+      if (!operationFailed) throw releaseError
+      throw new AggregateError([operationFailure, releaseError], 'Netrc mutation failed and lock release also failed', {
+        cause: operationFailure,
+      })
+    }
+
+    if (operationFailed) throw operationFailure
   }
 }

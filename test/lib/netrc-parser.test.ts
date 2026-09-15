@@ -1,6 +1,7 @@
 import {expect} from 'chai'
 import {ExecaError, execa} from 'execa'
 import fs from 'fs-extra'
+import nativeFs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import sinon from 'sinon'
@@ -309,6 +310,24 @@ machine api.heroku.com
   })
 
   // eslint-disable-next-line mocha/no-setup-in-describe
+  skipOnWindows('atomically replaces an existing file and preserves secure permissions', async function () {
+    const f = 'tmp/netrc'
+    fs.writeFileSync(f, 'machine old.heroku.com login old@example.com password old-token\n')
+    fs.chmodSync(f, 0o640)
+    const originalInode = fs.statSync(f).ino
+    const netrc = new Netrc(f)
+    await netrc.load()
+    netrc.machines['new.heroku.com'] = {login: 'new@example.com', password: 'new-token'}
+
+    await netrc.save()
+
+    expect(fs.statSync(f).ino).to.not.equal(originalInode)
+    expect(permissionBits(fs.statSync(f).mode)).to.equal(0o600)
+    expect(fs.readFileSync(f, 'utf8')).to.contain('machine new.heroku.com')
+    expect(fs.readdirSync('tmp').filter(entry => entry.includes('.netrc.') && entry.endsWith('.tmp'))).to.deep.equal([])
+  })
+
+  // eslint-disable-next-line mocha/no-setup-in-describe
   skipOnWindows('synchronously refuses a symlink target without modifying its destination', function () {
     const target = 'tmp/netrc-target'
     const f = 'tmp/netrc'
@@ -317,10 +336,8 @@ machine api.heroku.com
     fs.symlinkSync(path.basename(target), f)
 
     const netrc = new Netrc(f)
-    netrc.loadSync()
-    netrc.machines['api.heroku.com'].password = 'replacement'
 
-    expect(() => netrc.saveSync()).to.throw()
+    expect(() => netrc.loadSync()).to.throw()
     expect(fs.readFileSync(target, 'utf8')).to.equal(contents)
     expect(fs.lstatSync(f).isSymbolicLink()).to.equal(true)
   })
@@ -334,11 +351,9 @@ machine api.heroku.com
     fs.symlinkSync(path.basename(target), f)
 
     const netrc = new Netrc(f)
-    await netrc.load()
-    netrc.machines['api.heroku.com'].password = 'replacement'
 
     try {
-      await netrc.save()
+      await netrc.load()
       expect.fail('Expected an error to be thrown')
     } catch (error: unknown) {
       expect(error).to.be.instanceOf(Error)
@@ -372,6 +387,92 @@ machine api.heroku.com
     }
 
     expect(fs.readFileSync(target, 'utf8')).to.equal(contents)
+  })
+
+  // eslint-disable-next-line mocha/no-setup-in-describe
+  skipOnWindows('refuses encrypted symlinks on sync and async reads before invoking gpg', async function () {
+    const target = 'tmp/netrc-target.gpg'
+    const f = 'tmp/netrc.gpg'
+    const contents = 'not an encrypted netrc'
+    fs.writeFileSync(target, contents)
+    fs.symlinkSync(path.basename(target), f)
+
+    expect(() => new Netrc(f).loadSync()).to.throw()
+    await expect(new Netrc(f).load()).to.be.rejected
+    expect(fs.readFileSync(target, 'utf8')).to.equal(contents)
+  })
+
+  // eslint-disable-next-line mocha/no-setup-in-describe
+  skipOnWindows('removes the plaintext temporary file when an async write fails', async function () {
+    const f = 'tmp/netrc'
+    const netrc = new Netrc(f)
+    await netrc.load()
+    netrc.machines['api.heroku.com'] = {login: 'user@example.com', password: 'secret'}
+    const open = nativeFs.promises.open.bind(nativeFs.promises)
+    sinon.stub(nativeFs.promises, 'open').callsFake(async (file, flags, mode) => {
+      const handle = await open(file, flags, mode)
+      if (String(file).includes('.netrc.') && String(file).endsWith('.tmp')) {
+        sinon.stub(handle, 'writeFile').rejects(new Error('write failed'))
+      }
+
+      return handle
+    })
+
+    await expect(netrc.save()).to.be.rejectedWith('write failed')
+    expect(fs.readdirSync('tmp').filter(entry => entry.includes('.netrc.') && entry.endsWith('.tmp'))).to.deep.equal([])
+    expect(fs.pathExistsSync(f)).to.equal(false)
+  })
+
+  // eslint-disable-next-line mocha/no-setup-in-describe
+  skipOnWindows('removes the plaintext temporary file when async close or rename fails', async function () {
+    /* eslint-disable no-await-in-loop */
+    for (const failure of ['close', 'rename'] as const) {
+      sinon.restore()
+      const f = `tmp/netrc-${failure}`
+      const netrc = new Netrc(f)
+      await netrc.load()
+      netrc.machines['api.heroku.com'] = {login: 'user@example.com', password: 'secret'}
+      if (failure === 'close') {
+        const open = nativeFs.promises.open.bind(nativeFs.promises)
+        sinon.stub(nativeFs.promises, 'open').callsFake(async (file, flags, mode) => {
+          const handle = await open(file, flags, mode)
+          if (String(file).includes(`.netrc-${failure}.`) && String(file).endsWith('.tmp')) {
+            const close = handle.close.bind(handle)
+            sinon.stub(handle, 'close').callsFake(async () => {
+              await close()
+              throw new Error('close failed')
+            })
+          }
+
+          return handle
+        })
+      } else {
+        sinon.stub(nativeFs.promises, 'rename').rejects(new Error('rename failed'))
+      }
+
+      await expect(netrc.save()).to.be.rejectedWith(`${failure} failed`)
+      expect(fs.readdirSync('tmp').filter(entry => entry.includes(`.netrc-${failure}.`) && entry.endsWith('.tmp'))).to.deep.equal([])
+      expect(fs.pathExistsSync(f)).to.equal(false)
+    }
+    /* eslint-enable no-await-in-loop */
+  })
+
+  // eslint-disable-next-line mocha/no-setup-in-describe
+  skipOnWindows('removes the plaintext temporary file when a synchronous write, close, or rename fails', function () {
+    for (const failure of ['write', 'close', 'rename'] as const) {
+      sinon.restore()
+      const f = `tmp/netrc-sync-${failure}`
+      const netrc = new Netrc(f)
+      netrc.loadSync()
+      netrc.machines['api.heroku.com'] = {login: 'user@example.com', password: 'secret'}
+      if (failure === 'write') sinon.stub(nativeFs, 'writeFileSync').throws(new Error('write failed'))
+      else if (failure === 'close') sinon.stub(nativeFs, 'closeSync').throws(new Error('close failed'))
+      else sinon.stub(nativeFs, 'renameSync').throws(new Error('rename failed'))
+
+      expect(() => netrc.saveSync()).to.throw(`${failure} failed`)
+      expect(fs.readdirSync('tmp').filter(entry => entry.includes(`.netrc-sync-${failure}.`) && entry.endsWith('.tmp'))).to.deep.equal([])
+      expect(fs.pathExistsSync(f)).to.equal(false)
+    }
   })
 
   it('saving', function () {

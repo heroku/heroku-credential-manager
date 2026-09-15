@@ -336,13 +336,58 @@ describe('credential-manager', function () {
       expect(netrcStub.calledOnce).to.be.true
     })
 
-    it('should continue to netrc if credential store fails', async function () {
-      const macosStub = sinon.stub(MacOSHandler.prototype, 'removeAuth').throws(new Error('Keychain error'))
+    it('should attempt netrc cleanup and then surface a credential store failure', async function () {
+      const nativeError = new Error('Keychain error')
+      const macosStub = sinon.stub(MacOSHandler.prototype, 'removeAuth').throws(nativeError)
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').resolves()
+
+      const error = await credentialManager.removeAuth('user@example.com', ['api.heroku.com']).catch(error => error as Error)
+
+      expect(error).to.equal(nativeError)
+      expect(macosStub.calledOnce).to.be.true
+      expect(netrcStub.calledOnce).to.be.true
+    })
+
+    it('does not treat throw undefined from netrc removal as success', async function () {
+      const nativeStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').callsFake(async () => {
+        // eslint-disable-next-line no-throw-literal
+        throw undefined
+      })
+
+      const outcome = await credentialManager.removeAuth('user@example.com', ['api.heroku.com']).then(
+        () => ({fulfilled: true as const}),
+        error => ({error, fulfilled: false as const}),
+      )
+
+      expect(outcome.fulfilled).to.equal(false)
+      if (!outcome.fulfilled) expect(outcome.error).to.equal(undefined)
+      expect(nativeStub.calledOnce).to.be.true
+      expect(netrcStub.calledOnce).to.be.true
+    })
+
+    it('aggregates native and netrc removal failures after attempting both', async function () {
+      const nativeError = new Error('Keychain error')
+      const netrcError = new Error('Netrc error')
+      sinon.stub(MacOSHandler.prototype, 'removeAuth').throws(nativeError)
+      const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').rejects(netrcError)
+
+      const error = await credentialManager.removeAuth('user@example.com', ['api.heroku.com']).then(() => {
+        throw new Error('Expected removal failure')
+      }, error => error as AggregateError)
+
+      expect(netrcStub.calledOnce).to.be.true
+      expect(error).to.be.instanceOf(AggregateError)
+      expect(error.message).to.equal('Failed to remove credentials from native storage and netrc')
+      expect(error.errors).to.deep.equal([nativeError, netrcError])
+    })
+
+    it('treats a missing native credential as a no-op and still cleans netrc', async function () {
+      sinon.stub(MacOSHandler.prototype, 'removeAuth').throws(new NativeCredentialNotFoundError('Not found'))
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').resolves()
 
       await credentialManager.removeAuth('user@example.com', ['api.heroku.com'])
 
-      expect(macosStub.calledOnce).to.be.true
       expect(netrcStub.calledOnce).to.be.true
     })
 
@@ -426,13 +471,17 @@ describe('credential-manager', function () {
       expect(netrcStub.calledOnceWith(['api.heroku.com'], 'user@example.com', 'token')).to.be.true
     })
 
-    it('should continue netrc cleanup when an expected native token read fails', async function () {
-      sinon.stub(MacOSHandler.prototype, 'getAuth').throws(new Error('Keychain error'))
+    it('should continue netrc cleanup and surface an expected native token read failure', async function () {
+      const nativeError = new Error('Keychain error')
+      sinon.stub(MacOSHandler.prototype, 'getAuth').throws(nativeError)
       const removeStub = sinon.stub(MacOSHandler.prototype, 'removeAuth')
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').resolves()
 
-      await credentialManager.removeAuth('user@example.com', ['api.heroku.com'], 'heroku-cli', 'token')
+      const error = await credentialManager.removeAuth(
+        'user@example.com', ['api.heroku.com'], 'heroku-cli', 'token',
+      ).catch(error => error as Error)
 
+      expect(error).to.equal(nativeError)
       expect(removeStub.notCalled).to.be.true
       expect(netrcStub.calledOnceWith(['api.heroku.com'], 'user@example.com', 'token')).to.be.true
     })

@@ -431,10 +431,20 @@ export class Login {
         localCleanup,
         remoteResult,
       ] as const)
-      const cleanupFailure = cleanupResults.find(result => result.status === 'rejected') as PromiseRejectedResult | undefined
+      const failures = cleanupResults
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map(result => result.reason)
+      if (settledRemoteResult.status === 'rejected') {
+        if (settledRemoteResult.reason instanceof AggregateError) failures.push(...settledRemoteResult.reason.errors)
+        else failures.push(settledRemoteResult.reason)
+      }
 
-      if (cleanupFailure) throw cleanupFailure.reason
-      if (settledRemoteResult.status === 'rejected') throw settledRemoteResult.reason
+      if (failures.length === 1) throw failures[0]
+      if (failures.length > 1) {
+        const primary = failures[0]
+        const message = primary instanceof Error ? primary.message : String(primary)
+        throw new AggregateError(failures, message, {cause: primary})
+      }
     } finally {
       this.timers.clearTimeout(timer)
     }
@@ -620,8 +630,15 @@ export class Login {
     })()
     const authorizations = this.authorizationCleanup(token, context)
     const results = await Promise.allSettled([session, authorizations])
-    const failure = results.find(result => result.status === 'rejected') as PromiseRejectedResult | undefined
-    if (failure) throw failure.reason
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map(result => result.reason)
+    if (failures.length === 1) throw failures[0]
+    if (failures.length > 1) {
+      const primary = failures[0]
+      const message = primary instanceof Error ? primary.message : String(primary)
+      throw new AggregateError(failures, message, {cause: primary})
+    }
   }
 
   private async safeStorageOperation(operation: () => Promise<void>, sensitiveValues: readonly string[]): Promise<void> {

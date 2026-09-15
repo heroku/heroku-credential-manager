@@ -116,6 +116,8 @@ export async function listKeychainAccounts(service = SERVICE_NAME): Promise<stri
  * @param service - Service name (defaults to 'heroku-cli')
  * @param expectedToken - Optional token that existing credentials must exactly match
  * @returns Promise that resolves when credentials are removed
+ * @throws The native or netrc error after both cleanups are attempted. If both fail, throws an AggregateError whose
+ * errors are ordered native first and netrc second.
  */
 export async function removeAuth(
   account: string | undefined,
@@ -125,6 +127,10 @@ export async function removeAuth(
 ): Promise<void> {
   const netrcHandler = new NetrcHandler()
   const nativeStore = getNativeCredentialStore()
+  let nativeError: unknown
+  let nativeFailed = false
+  let netrcError: unknown
+  let netrcFailed = false
 
   if (nativeStore && account) {
     try {
@@ -135,13 +141,30 @@ export async function removeAuth(
     } catch (error) {
       if (!(error instanceof NativeCredentialNotFoundError)) {
         credDebug('native credential store failed during removeAuth; continuing netrc cleanup')
+        nativeFailed = true
+        nativeError = error
       }
     }
   }
 
   if (hosts.length > 0) {
-    await netrcHandler.removeAuthForHosts(hosts, account, expectedToken)
+    try {
+      await netrcHandler.removeAuthForHosts(hosts, account, expectedToken)
+    } catch (error) {
+      netrcFailed = true
+      netrcError = error
+    }
   }
+
+  if (nativeFailed && netrcFailed) {
+    throw new AggregateError(
+      [nativeError, netrcError],
+      'Failed to remove credentials from native storage and netrc',
+    )
+  }
+
+  if (nativeFailed) throw nativeError
+  if (netrcFailed) throw netrcError
 }
 
 /**

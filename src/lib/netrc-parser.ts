@@ -1,5 +1,6 @@
 import debug from 'debug'
 import {execa, execaSync} from 'execa'
+import {randomUUID} from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -30,36 +31,229 @@ export type MachinesWithTokens = {
 const credDebug = debug('heroku-credential-manager')
 const secureFileMode = 0o600
 
-function secureWriteFlags(): number {
+function secureTemporaryWriteFlags(): number {
+  const noFollow = process.platform === 'win32' ? 0 : fs.constants.O_NOFOLLOW ?? 0
+  // eslint-disable-next-line no-bitwise
+  return fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | noFollow
+}
+
+function secureReadFlags(): number {
   const noFollow = process.platform === 'win32' ? 0 : fs.constants.O_NOFOLLOW ?? 0
   const nonBlocking = process.platform === 'win32' ? 0 : fs.constants.O_NONBLOCK
   // eslint-disable-next-line no-bitwise
-  return fs.constants.O_CREAT | fs.constants.O_WRONLY | noFollow | nonBlocking
+  return fs.constants.O_RDONLY | noFollow | nonBlocking
 }
 
 function validateRegularFile(stats: fs.Stats, file: string): void {
   if (!stats.isFile()) throw new Error(`Refusing to write netrc data to non-regular file: ${file}`)
 }
 
-async function writeFileSecurely(file: string, body: string): Promise<void> {
-  const handle = await fs.promises.open(file, secureWriteFlags(), secureFileMode)
+function validateReadableFile(stats: fs.Stats, file: string): void {
+  if (!stats.isFile()) throw new Error(`Refusing to read netrc data from non-regular file: ${file}`)
+}
+
+async function readFileSecurely(file: string): Promise<Buffer> {
+  let handle: fs.promises.FileHandle | undefined
   try {
-    validateRegularFile(await handle.stat(), file)
+    if (process.platform === 'win32') validateReadableFile(await fs.promises.lstat(file), file)
+    handle = await fs.promises.open(file, secureReadFlags())
+    validateReadableFile(await handle.stat(), file)
+    return await handle.readFile()
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return Buffer.alloc(0)
+    throw error
+  } finally {
+    await handle?.close()
+  }
+}
+
+function readFileSecurelySync(file: string): Buffer {
+  let descriptor: number | undefined
+  try {
+    if (process.platform === 'win32') validateReadableFile(fs.lstatSync(file), file)
+    descriptor = fs.openSync(file, secureReadFlags())
+    validateReadableFile(fs.fstatSync(descriptor), file)
+    return fs.readFileSync(descriptor)
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return Buffer.alloc(0)
+    throw error
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor)
+  }
+}
+
+async function writeFileSecurely(file: string, body: string, assertSafeToCommit?: () => Promise<void>): Promise<void> {
+  await validateDestination(file)
+  const temporaryFile = temporaryPath(file)
+  let handle: fs.promises.FileHandle | undefined
+  let failure: unknown
+  let failed = false
+  try {
+    handle = await fs.promises.open(temporaryFile, secureTemporaryWriteFlags(), secureFileMode)
+    validateRegularFile(await handle.stat(), temporaryFile)
     if (process.platform !== 'win32') await handle.chmod(secureFileMode)
-    await handle.truncate(0)
     await handle.writeFile(body)
+    await handle.sync()
+    await handle.close()
+    handle = undefined
+    await assertSafeToCommit?.()
+    await validateDestination(file)
+    await renameWithRetry(temporaryFile, file, assertSafeToCommit)
+    await syncParentDirectory(file)
+  } catch (error) {
+    failed = true
+    failure = error
+  } finally {
+    if (handle) {
+      try {
+        await handle.close()
+      } catch (error) {
+        if (!failed) {
+          failed = true
+          failure = error
+        }
+      }
+    }
+
+    if (failed) {
+      try {
+        await fs.promises.unlink(temporaryFile)
+      } catch (error) {
+        if (!isFileSystemError(error, 'ENOENT')) {
+          failure = aggregateFailures(failure, error, 'Failed to write and clean up temporary netrc file')
+        }
+      }
+    }
+  }
+
+  if (failed) throw failure
+}
+
+function writeFileSecurelySync(file: string, body: string): void {
+  validateDestinationSync(file)
+  const temporaryFile = temporaryPath(file)
+  let descriptor: number | undefined
+  let failure: unknown
+  let failed = false
+  try {
+    descriptor = fs.openSync(temporaryFile, secureTemporaryWriteFlags(), secureFileMode)
+    validateRegularFile(fs.fstatSync(descriptor), temporaryFile)
+    if (process.platform !== 'win32') fs.fchmodSync(descriptor, secureFileMode)
+    fs.writeFileSync(descriptor, body)
+    fs.fsyncSync(descriptor)
+    fs.closeSync(descriptor)
+    descriptor = undefined
+    validateDestinationSync(file)
+    renameWithRetrySync(temporaryFile, file)
+    syncParentDirectorySync(file)
+  } catch (error) {
+    failed = true
+    failure = error
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor)
+      } catch (error) {
+        if (!failed) {
+          failed = true
+          failure = error
+        }
+      }
+    }
+
+    if (failed) {
+      try {
+        fs.unlinkSync(temporaryFile)
+      } catch (error) {
+        if (!isFileSystemError(error, 'ENOENT')) {
+          failure = aggregateFailures(failure, error, 'Failed to write and clean up temporary netrc file')
+        }
+      }
+    }
+  }
+
+  if (failed) throw failure
+}
+
+function aggregateFailures(primary: unknown, secondary: unknown, message: string): AggregateError {
+  return new AggregateError([primary, secondary], message, {cause: primary})
+}
+
+function isFileSystemError(error: unknown, code: string): boolean {
+  return error instanceof Error && 'code' in error && error.code === code
+}
+
+function isRetryableRenameError(error: unknown): boolean {
+  return process.platform === 'win32'
+    && error instanceof Error
+    && 'code' in error
+    && ['EACCES', 'EBUSY', 'EPERM'].includes(String(error.code))
+}
+
+async function renameWithRetry(source: string, destination: string, assertSafeToCommit?: () => Promise<void>): Promise<void> {
+  /* eslint-disable no-await-in-loop */
+  for (const waitMs of [0, 10, 25, 50]) {
+    if (waitMs > 0) await new Promise(resolve => {
+      setTimeout(resolve, waitMs)
+    })
+    await assertSafeToCommit?.()
+    try {
+      await fs.promises.rename(source, destination)
+      return
+    } catch (error) {
+      if (!isRetryableRenameError(error) || waitMs === 50) throw error
+    }
+  }
+  /* eslint-enable no-await-in-loop */
+}
+
+function renameWithRetrySync(source: string, destination: string): void {
+  for (const waitMs of [0, 10, 25, 50]) {
+    if (waitMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs)
+    try {
+      fs.renameSync(source, destination)
+      return
+    } catch (error) {
+      if (!isRetryableRenameError(error) || waitMs === 50) throw error
+    }
+  }
+}
+
+function temporaryPath(file: string): string {
+  return path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomUUID()}.tmp`)
+}
+
+async function validateDestination(file: string): Promise<void> {
+  try {
+    validateRegularFile(await fs.promises.lstat(file), file)
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+  }
+}
+
+function validateDestinationSync(file: string): void {
+  try {
+    validateRegularFile(fs.lstatSync(file), file)
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+  }
+}
+
+async function syncParentDirectory(file: string): Promise<void> {
+  if (process.platform === 'win32') return
+  const handle = await fs.promises.open(path.dirname(file), fs.constants.O_RDONLY)
+  try {
+    await handle.sync()
   } finally {
     await handle.close()
   }
 }
 
-function writeFileSecurelySync(file: string, body: string): void {
-  const descriptor = fs.openSync(file, secureWriteFlags(), secureFileMode)
+function syncParentDirectorySync(file: string): void {
+  if (process.platform === 'win32') return
+  const descriptor = fs.openSync(path.dirname(file), fs.constants.O_RDONLY)
   try {
-    validateRegularFile(fs.fstatSync(descriptor), file)
-    if (process.platform !== 'win32') fs.fchmodSync(descriptor, secureFileMode)
-    fs.ftruncateSync(descriptor, 0)
-    fs.writeFileSync(descriptor, body)
+    fs.fsyncSync(descriptor)
   } finally {
     fs.closeSync(descriptor)
   }
@@ -222,20 +416,15 @@ export class Netrc {
     try {
       credDebug('load', this.file)
       const decryptFile = async (): Promise<string> => {
-        const {exitCode, stdout} = await execa('gpg', this.gpgDecryptArgs, {reject: false, stdio: ['inherit', 'pipe', 'inherit']})
+        const encrypted = await readFileSecurely(this.file)
+        const {exitCode, stdout} = await execa('gpg', this.gpgDecryptArgs, {input: encrypted, reject: false, stdio: ['pipe', 'pipe', 'inherit']})
         if (exitCode !== 0) throw new Error(`gpg exited with code ${exitCode}`)
         return stdout
       }
 
       const body = await (path.extname(this.file) === '.gpg'
         ? decryptFile()
-        : new Promise<string>((resolve, reject) => {
-          fs.readFile(this.file, {encoding: 'utf8'}, (err, data) => {
-            if (err && err.code !== 'ENOENT') reject(err)
-            debug('ENOENT')
-            resolve(data || '')
-          })
-        }))
+        : (await readFileSecurely(this.file)).toString('utf8'))
       this.machines = parse(body)
       credDebug('machines: %o', Object.keys(this.machines))
     } catch (error) {
@@ -252,21 +441,15 @@ export class Netrc {
     try {
       credDebug('loadSync', this.file)
       const decryptFile = (): string => {
-        const {exitCode, stdout} = execaSync('gpg', this.gpgDecryptArgs, {reject: false, stdio: ['inherit', 'pipe', 'inherit']})
+        const encrypted = readFileSecurelySync(this.file)
+        const {exitCode, stdout} = execaSync('gpg', this.gpgDecryptArgs, {input: encrypted, reject: false, stdio: ['pipe', 'pipe', 'inherit']})
         if (exitCode !== 0) throw new Error(`gpg exited with code ${exitCode}`)
         return stdout
       }
 
-      let body = ''
-      if (path.extname(this.file) === '.gpg') {
-        body = decryptFile()
-      } else {
-        try {
-          body = fs.readFileSync(this.file, 'utf8')
-        } catch (error: unknown) {
-          if (error instanceof Error && 'code' in error && error.code !== 'ENOENT') throw error
-        }
-      }
+      const body = path.extname(this.file) === '.gpg'
+        ? decryptFile()
+        : readFileSecurelySync(this.file).toString('utf8')
 
       this.machines = parse(body)
       credDebug('machines: %o', Object.keys(this.machines))
@@ -278,9 +461,10 @@ export class Netrc {
   /**
    * Asynchronously saves the current machines to the netrc file.
    * Handles GPG encryption if the file has a .gpg extension.
+   * @param assertSafeToCommit - Optional ownership assertion run immediately before each atomic rename attempt.
    * @returns A promise that resolves when saving is complete
    */
-  async save() {
+  async save(assertSafeToCommit?: () => Promise<void>) {
     credDebug('save', this.file)
     let body = this.output
     if (this.file.endsWith('.gpg')) {
@@ -289,7 +473,7 @@ export class Netrc {
       body = stdout
     }
 
-    await writeFileSecurely(this.file, body)
+    await writeFileSecurely(this.file, body, assertSafeToCommit)
   }
 
   /**
@@ -365,7 +549,7 @@ export class Netrc {
    * @returns Array of GPG command-line arguments for decryption
    */
   private get gpgDecryptArgs() {
-    const args = ['--batch', '--quiet', '--decrypt', this.file]
+    const args = ['--batch', '--quiet', '--decrypt']
     credDebug('running gpg with args %o', args)
     return args
   }

@@ -5,7 +5,7 @@ import {type ChildProcess, spawn} from 'node:child_process'
 import nativeFs from 'node:fs'
 import os from 'node:os'
 import {join, resolve as resolvePath} from 'node:path'
-import {fileURLToPath} from 'node:url'
+import {fileURLToPath, pathToFileURL} from 'node:url'
 import sinon from 'sinon'
 
 import {type MachineToken, parse} from '../../src/lib/netrc-parser.js'
@@ -291,9 +291,11 @@ describe('NetrcHandler cross-process mutations', function () {
   let tmpDir: string
   let netrcPath: string
   let worker: string
+  let workerLoader: string
 
   beforeEach(async function () {
     worker = fileURLToPath(new URL('../helpers/netrc-worker.mjs', import.meta.url))
+    workerLoader = pathToFileURL(resolvePath('node_modules/ts-node/esm.mjs')).href
     tmpDir = await fs.mkdtemp(join(os.tmpdir(), 'heroku-netrc-handler-'))
     netrcPath = join(tmpDir, 'netrc')
     await fs.writeFile(netrcPath, '', {mode: 0o600})
@@ -323,7 +325,7 @@ describe('NetrcHandler cross-process mutations', function () {
       )))
       const child = spawn(process.execPath, [
         '--loader',
-        resolvePath('node_modules/ts-node/esm.mjs'),
+        workerLoader,
         worker,
         operation,
         netrcPath,
@@ -377,7 +379,7 @@ describe('NetrcHandler cross-process mutations', function () {
     )))
     const child = spawn(process.execPath, [
       '--loader',
-      resolvePath('node_modules/ts-node/esm.mjs'),
+      workerLoader,
       worker,
       'save',
       netrcPath,

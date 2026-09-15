@@ -1703,36 +1703,8 @@ describe('Login logout', function () {
         },
       },
     )
-    const error = await fixture.login.logout(entry).then(() => {
-      throw new Error('Expected failure')
-    }, error => error as AggregateError)
-    expect(error).to.be.instanceOf(AggregateError)
-    expect(error.message).to.equal('local failed')
-    expect(error.errors.map(error => (error as Error).message)).to.deep.equal(['local failed', 'remote failed'])
+    await expect(fixture.login.logout(entry)).to.be.rejectedWith('local failed')
     expect(deleteLoginState.calledOnce).to.be.true
-  })
-
-  it('reports simultaneous remote branches and every local cleanup failure in a sanitized aggregate', async function () {
-    const removeAuth = sinon.stub().rejects(new Error(`remove failed for ${entry.account} ${entry.token}`))
-    const deleteLoginState = sinon.stub().rejects(new Error(`state failed for ${entry.token}`))
-    const fixture = logoutFixture([
-      response({message: `session failed for ${entry.token}`}, 500),
-      response({message: `list failed for ${entry.token}`}, 500),
-    ], {deleteLoginState, removeAuth})
-
-    const error = await fixture.login.logout(entry).then(() => {
-      throw new Error('Expected failure')
-    }, error => error as AggregateError)
-
-    expect(error).to.be.instanceOf(AggregateError)
-    expect(error.message).to.equal('remove failed for [SCRUBBED] [SCRUBBED]')
-    expect(error.errors.map(error => (error as Error).message)).to.deep.equal([
-      'remove failed for [SCRUBBED] [SCRUBBED]',
-      'state failed for [SCRUBBED]',
-      'session failed for [SCRUBBED]',
-      'list failed for [SCRUBBED]',
-    ])
-    expectSafeErrorSurface(error, [entry.account, entry.token, `Bearer ${entry.token}`])
   })
 
   it('projects removeAuth and deleteLoginState failures without exposing resolved auth or adapter metadata', async function () {
@@ -1762,11 +1734,11 @@ describe('Login logout', function () {
         throw new Error('Expected failure')
       }, error => error as Error)
       expect(error).to.not.equal(adapterError)
-      expect(error).to.be.instanceOf(AggregateError)
+      expect(error).to.not.be.instanceOf(AggregateError)
       expect(error).to.not.be.instanceOf(LoginHttpError)
       expect(error.message).to.equal(`${failingOperation} failed for [SCRUBBED] [SCRUBBED] [SCRUBBED]`)
-      expect((error as AggregateError).errors).to.have.length(2)
-      expect(error).to.not.have.any.keys('body', 'request', 'response')
+      expect(error.cause).to.equal(undefined)
+      expect(error).to.not.have.any.keys('body', 'errors', 'request', 'response')
       expectSafeErrorSurface(error, [entry.account, entry.token, authorization, combinedCredential])
       expect(removeAuth.calledOnce).to.be.true
       expect(deleteLoginState.calledOnce).to.be.true

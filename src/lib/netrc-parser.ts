@@ -39,51 +39,8 @@ function secureTemporaryWriteFlags(): number {
   return fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | noFollow
 }
 
-function secureReadFlags(): number {
-  const noFollow = process.platform === 'win32' ? 0 : fs.constants.O_NOFOLLOW ?? 0
-  const nonBlocking = process.platform === 'win32' ? 0 : fs.constants.O_NONBLOCK
-  // eslint-disable-next-line no-bitwise
-  return fs.constants.O_RDONLY | noFollow | nonBlocking
-}
-
 function validateRegularFile(stats: fs.Stats, file: string): void {
   if (!stats.isFile()) throw new Error(`Refusing to write netrc data to non-regular file: ${file}`)
-}
-
-function validateReadableFile(stats: fs.Stats, file: string): void {
-  if (!stats.isFile()) throw new Error(`Refusing to read netrc data from non-regular file: ${file}`)
-}
-
-async function readFileSecurely(file: string): Promise<Buffer> {
-  let handle: fs.promises.FileHandle | undefined
-  try {
-    // Windows lacks reliable O_NOFOLLOW support; lstat/open is best-effort and retains a reparse-point/TOCTOU race.
-    if (process.platform === 'win32') validateReadableFile(await fs.promises.lstat(file), file)
-    handle = await fs.promises.open(file, secureReadFlags())
-    validateReadableFile(await handle.stat(), file)
-    return await handle.readFile()
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return Buffer.alloc(0)
-    throw error
-  } finally {
-    await handle?.close()
-  }
-}
-
-function readFileSecurelySync(file: string): Buffer {
-  let descriptor: number | undefined
-  try {
-    // Windows lacks reliable O_NOFOLLOW support; lstat/open is best-effort and retains a reparse-point/TOCTOU race.
-    if (process.platform === 'win32') validateReadableFile(fs.lstatSync(file), file)
-    descriptor = fs.openSync(file, secureReadFlags())
-    validateReadableFile(fs.fstatSync(descriptor), file)
-    return fs.readFileSync(descriptor)
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return Buffer.alloc(0)
-    throw error
-  } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor)
-  }
 }
 
 async function writeFileSecurely(file: string, body: string, assertSafeToCommit?: () => Promise<void>): Promise<void> {
@@ -432,15 +389,20 @@ export class Netrc {
     try {
       credDebug('load', this.file)
       const decryptFile = async (): Promise<string> => {
-        const encrypted = await readFileSecurely(this.file)
-        const {exitCode, stdout} = await execa('gpg', this.gpgDecryptArgs, {input: encrypted, reject: false, stdio: ['pipe', 'pipe', 'inherit']})
+        const {exitCode, stdout} = await execa('gpg', this.gpgDecryptArgs, {reject: false, stdio: ['inherit', 'pipe', 'inherit']})
         if (exitCode !== 0) throw new Error(`gpg exited with code ${exitCode}`)
         return stdout
       }
 
       const body = await (path.extname(this.file) === '.gpg'
         ? decryptFile()
-        : (await readFileSecurely(this.file)).toString('utf8'))
+        : new Promise<string>((resolve, reject) => {
+          fs.readFile(this.file, {encoding: 'utf8'}, (error, data) => {
+            if (error && error.code !== 'ENOENT') reject(error)
+            debug('ENOENT')
+            resolve(data || '')
+          })
+        }))
       this.machines = parse(body)
       credDebug('machines: %o', Object.keys(this.machines))
     } catch (error) {
@@ -457,15 +419,21 @@ export class Netrc {
     try {
       credDebug('loadSync', this.file)
       const decryptFile = (): string => {
-        const encrypted = readFileSecurelySync(this.file)
-        const {exitCode, stdout} = execaSync('gpg', this.gpgDecryptArgs, {input: encrypted, reject: false, stdio: ['pipe', 'pipe', 'inherit']})
+        const {exitCode, stdout} = execaSync('gpg', this.gpgDecryptArgs, {reject: false, stdio: ['inherit', 'pipe', 'inherit']})
         if (exitCode !== 0) throw new Error(`gpg exited with code ${exitCode}`)
         return stdout
       }
 
-      const body = path.extname(this.file) === '.gpg'
-        ? decryptFile()
-        : readFileSecurelySync(this.file).toString('utf8')
+      let body = ''
+      if (path.extname(this.file) === '.gpg') {
+        body = decryptFile()
+      } else {
+        try {
+          body = fs.readFileSync(this.file, 'utf8')
+        } catch (error: unknown) {
+          if (error instanceof Error && 'code' in error && error.code !== 'ENOENT') throw error
+        }
+      }
 
       this.machines = parse(body)
       credDebug('machines: %o', Object.keys(this.machines))
@@ -565,7 +533,7 @@ export class Netrc {
    * @returns Array of GPG command-line arguments for decryption
    */
   private get gpgDecryptArgs() {
-    const args = ['--batch', '--quiet', '--decrypt']
+    const args = ['--batch', '--quiet', '--decrypt', this.file]
     credDebug('running gpg with args %o', args)
     return args
   }

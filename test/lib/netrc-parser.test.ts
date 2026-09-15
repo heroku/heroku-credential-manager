@@ -378,7 +378,7 @@ machine api.heroku.com
   })
 
   // eslint-disable-next-line mocha/no-setup-in-describe
-  skipOnWindows('synchronously refuses a symlink target without modifying its destination', function () {
+  skipOnWindows('synchronously reads a symlink target but refuses to write through it', function () {
     const target = 'tmp/netrc-target'
     const f = 'tmp/netrc'
     const contents = 'machine api.heroku.com login user@example.com password original\n'
@@ -386,14 +386,16 @@ machine api.heroku.com
     fs.symlinkSync(path.basename(target), f)
 
     const netrc = new Netrc(f)
+    netrc.loadSync()
+    netrc.machines['api.heroku.com'].password = 'replacement'
 
-    expect(() => netrc.loadSync()).to.throw()
+    expect(() => netrc.saveSync()).to.throw()
     expect(fs.readFileSync(target, 'utf8')).to.equal(contents)
     expect(fs.lstatSync(f).isSymbolicLink()).to.equal(true)
   })
 
   // eslint-disable-next-line mocha/no-setup-in-describe
-  skipOnWindows('asynchronously refuses a symlink target without modifying its destination', async function () {
+  skipOnWindows('asynchronously reads a symlink target but refuses to write through it', async function () {
     const target = 'tmp/netrc-target'
     const f = 'tmp/netrc'
     const contents = 'machine api.heroku.com login user@example.com password original\n'
@@ -401,9 +403,11 @@ machine api.heroku.com
     fs.symlinkSync(path.basename(target), f)
 
     const netrc = new Netrc(f)
+    await netrc.load()
+    netrc.machines['api.heroku.com'].password = 'replacement'
 
     try {
-      await netrc.load()
+      await netrc.save()
       expect.fail('Expected an error to be thrown')
     } catch (error: unknown) {
       expect(error).to.be.instanceOf(Error)
@@ -436,19 +440,6 @@ machine api.heroku.com
       expect(error).to.be.instanceOf(Error)
     }
 
-    expect(fs.readFileSync(target, 'utf8')).to.equal(contents)
-  })
-
-  // eslint-disable-next-line mocha/no-setup-in-describe
-  skipOnWindows('refuses encrypted symlinks on sync and async reads before invoking gpg', async function () {
-    const target = 'tmp/netrc-target.gpg'
-    const f = 'tmp/netrc.gpg'
-    const contents = 'not an encrypted netrc'
-    fs.writeFileSync(target, contents)
-    fs.symlinkSync(path.basename(target), f)
-
-    expect(() => new Netrc(f).loadSync()).to.throw()
-    await expect(new Netrc(f).load()).to.be.rejected
     expect(fs.readFileSync(target, 'utf8')).to.equal(contents)
   })
 

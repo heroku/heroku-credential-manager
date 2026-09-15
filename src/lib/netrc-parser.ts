@@ -5,6 +5,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
+import {NetrcPostCommitError} from '../netrc-post-commit-error.js'
+
 export type Token = {content: string, type: 'other'} | MachineToken
 export type MachineToken = {
   comment?: string
@@ -55,6 +57,7 @@ function validateReadableFile(stats: fs.Stats, file: string): void {
 async function readFileSecurely(file: string): Promise<Buffer> {
   let handle: fs.promises.FileHandle | undefined
   try {
+    // Windows lacks reliable O_NOFOLLOW support; lstat/open is best-effort and retains a reparse-point/TOCTOU race.
     if (process.platform === 'win32') validateReadableFile(await fs.promises.lstat(file), file)
     handle = await fs.promises.open(file, secureReadFlags())
     validateReadableFile(await handle.stat(), file)
@@ -70,6 +73,7 @@ async function readFileSecurely(file: string): Promise<Buffer> {
 function readFileSecurelySync(file: string): Buffer {
   let descriptor: number | undefined
   try {
+    // Windows lacks reliable O_NOFOLLOW support; lstat/open is best-effort and retains a reparse-point/TOCTOU race.
     if (process.platform === 'win32') validateReadableFile(fs.lstatSync(file), file)
     descriptor = fs.openSync(file, secureReadFlags())
     validateReadableFile(fs.fstatSync(descriptor), file)
@@ -83,9 +87,11 @@ function readFileSecurelySync(file: string): Buffer {
 }
 
 async function writeFileSecurely(file: string, body: string, assertSafeToCommit?: () => Promise<void>): Promise<void> {
+  // Atomic rename prevents partial/torn files, not lost updates; NetrcHandler locks cooperating package transactions.
   await validateDestination(file)
   const temporaryFile = temporaryPath(file)
   let handle: fs.promises.FileHandle | undefined
+  let committed = false
   let failure: unknown
   let failed = false
   try {
@@ -99,6 +105,7 @@ async function writeFileSecurely(file: string, body: string, assertSafeToCommit?
     await assertSafeToCommit?.()
     await validateDestination(file)
     await renameWithRetry(temporaryFile, file, assertSafeToCommit)
+    committed = true
     await syncParentDirectory(file)
   } catch (error) {
     failed = true
@@ -126,13 +133,18 @@ async function writeFileSecurely(file: string, body: string, assertSafeToCommit?
     }
   }
 
-  if (failed) throw failure
+  if (failed) {
+    if (committed) throw new NetrcPostCommitError('Netrc contents committed but parent-directory durability sync failed', {cause: failure})
+    throw failure
+  }
 }
 
 function writeFileSecurelySync(file: string, body: string): void {
+  // Atomic rename prevents partial/torn files, not lost updates; synchronous Netrc callers do not share handler locks.
   validateDestinationSync(file)
   const temporaryFile = temporaryPath(file)
   let descriptor: number | undefined
+  let committed = false
   let failure: unknown
   let failed = false
   try {
@@ -145,6 +157,7 @@ function writeFileSecurelySync(file: string, body: string): void {
     descriptor = undefined
     validateDestinationSync(file)
     renameWithRetrySync(temporaryFile, file)
+    committed = true
     syncParentDirectorySync(file)
   } catch (error) {
     failed = true
@@ -172,7 +185,10 @@ function writeFileSecurelySync(file: string, body: string): void {
     }
   }
 
-  if (failed) throw failure
+  if (failed) {
+    if (committed) throw new NetrcPostCommitError('Netrc contents committed but parent-directory durability sync failed', {cause: failure})
+    throw failure
+  }
 }
 
 function aggregateFailures(primary: unknown, secondary: unknown, message: string): AggregateError {

@@ -7,6 +7,7 @@ import path from 'node:path'
 import sinon from 'sinon'
 
 import {Netrc, parse} from '../../src/lib/netrc-parser.js'
+import {NetrcPostCommitError} from '../../src/netrc-post-commit-error.js'
 
 process.env.NETRC_PARSER_DEBUG = '1'
 
@@ -328,6 +329,55 @@ machine api.heroku.com
   })
 
   // eslint-disable-next-line mocha/no-setup-in-describe
+  skipOnWindows('reports an async parent-directory sync failure as post-commit', async function () {
+    const f = 'tmp/netrc'
+    const netrc = new Netrc(f)
+    await netrc.load()
+    netrc.machines['new.heroku.com'] = {login: 'new@example.com', password: 'new-token'}
+    const open = nativeFs.promises.open.bind(nativeFs.promises)
+    const durabilityFailure = new Error('directory sync failed')
+    sinon.stub(nativeFs.promises, 'open').callsFake(async (file, flags, mode) => {
+      const handle = await open(file, flags, mode)
+      if (String(file) === path.dirname(f)) sinon.stub(handle, 'sync').rejects(durabilityFailure)
+      return handle
+    })
+
+    let failure: unknown
+    try {
+      await netrc.save()
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).to.be.instanceOf(NetrcPostCommitError)
+    expect((failure as NetrcPostCommitError).committed).to.equal(true)
+    expect((failure as NetrcPostCommitError).cause).to.equal(durabilityFailure)
+    expect(fs.readFileSync(f, 'utf8')).to.contain('machine new.heroku.com')
+  })
+
+  // eslint-disable-next-line mocha/no-setup-in-describe
+  skipOnWindows('reports a synchronous parent-directory sync failure as post-commit', function () {
+    const f = 'tmp/netrc'
+    const netrc = new Netrc(f)
+    netrc.loadSync()
+    netrc.machines['new.heroku.com'] = {login: 'new@example.com', password: 'new-token'}
+    const durabilityFailure = new Error('directory sync failed')
+    sinon.stub(nativeFs, 'fsyncSync').onSecondCall().throws(durabilityFailure)
+
+    let failure: unknown
+    try {
+      netrc.saveSync()
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).to.be.instanceOf(NetrcPostCommitError)
+    expect((failure as NetrcPostCommitError).committed).to.equal(true)
+    expect((failure as NetrcPostCommitError).cause).to.equal(durabilityFailure)
+    expect(fs.readFileSync(f, 'utf8')).to.contain('machine new.heroku.com')
+  })
+
+  // eslint-disable-next-line mocha/no-setup-in-describe
   skipOnWindows('synchronously refuses a symlink target without modifying its destination', function () {
     const target = 'tmp/netrc-target'
     const f = 'tmp/netrc'
@@ -450,7 +500,9 @@ machine api.heroku.com
         sinon.stub(nativeFs.promises, 'rename').rejects(new Error('rename failed'))
       }
 
-      await expect(netrc.save()).to.be.rejectedWith(`${failure} failed`)
+      const save = netrc.save()
+      await expect(save).to.be.rejectedWith(`${failure} failed`)
+      await expect(save).not.to.be.rejectedWith(NetrcPostCommitError)
       expect(fs.readdirSync('tmp').filter(entry => entry.includes(`.netrc-${failure}.`) && entry.endsWith('.tmp'))).to.deep.equal([])
       expect(fs.pathExistsSync(f)).to.equal(false)
     }
@@ -469,7 +521,16 @@ machine api.heroku.com
       else if (failure === 'close') sinon.stub(nativeFs, 'closeSync').throws(new Error('close failed'))
       else sinon.stub(nativeFs, 'renameSync').throws(new Error('rename failed'))
 
-      expect(() => netrc.saveSync()).to.throw(`${failure} failed`)
+      let saveFailure: unknown
+      try {
+        netrc.saveSync()
+      } catch (error) {
+        saveFailure = error
+      }
+
+      expect(saveFailure).to.be.instanceOf(Error)
+      expect(saveFailure).not.to.be.instanceOf(NetrcPostCommitError)
+      expect((saveFailure as Error).message).to.equal(`${failure} failed`)
       expect(fs.readdirSync('tmp').filter(entry => entry.includes(`.netrc-sync-${failure}.`) && entry.endsWith('.tmp'))).to.deep.equal([])
       expect(fs.pathExistsSync(f)).to.equal(false)
     }

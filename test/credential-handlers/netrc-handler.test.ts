@@ -12,7 +12,8 @@ import {type MachineToken, parse} from '../../src/lib/netrc-parser.js'
 
 use(chaiAsPromised)
 
-import {NetrcHandler, netrcLockTestHooks} from '../../src/credential-handlers/netrc-handler.js'
+import {NetrcHandler} from '../../src/credential-handlers/netrc-handler.js'
+import {NetrcPostCommitError} from '../../src/netrc-post-commit-error.js'
 import {restoreNetrcStub, stubNetrc} from '../helpers/netrc-stub.js'
 
 async function waitForPath(file: string, timeoutMs = 2000): Promise<boolean> {
@@ -27,6 +28,17 @@ async function waitForPath(file: string, timeoutMs = 2000): Promise<boolean> {
   /* eslint-enable no-await-in-loop */
 
   return fs.pathExists(file)
+}
+
+async function writeLockOwner(lockPath: string, owner: {
+  createdAt: number
+  hostname: string
+  nonce: string
+  pid: number
+  processStartedAt?: number
+}, updatedAt = new Date()): Promise<void> {
+  await fs.writeJson(lockPath, owner, {mode: 0o600})
+  await fs.utimes(lockPath, updatedAt, updatedAt)
 }
 
 describe('NetrcHandler', function () {
@@ -87,45 +99,41 @@ describe('NetrcHandler', function () {
       expect((handler.netrc.machines._tokens[0] as MachineToken).internalWhitespace).to.equal('\n  ')
     })
   })
+})
 
-  describe('batch netrc (temp file, no prototype stub)', function () {
-    let tmpDir: string
-    let netrcPath: string
+// This top-level suite is intentionally outside NetrcHandler's prototype stubs.
+/* eslint-disable mocha/max-top-level-suites */
+describe('NetrcHandler batch netrc persistence', function () {
+  let tmpDir: string
+  let netrcPath: string
 
-    beforeEach(async function () {
-      tmpDir = resolvePath('tmp/netrc-handler-batch')
-      await fs.mkdirp(tmpDir)
-      netrcPath = resolvePath(tmpDir, `n-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-      await fs.writeFile(netrcPath, '', 'utf8')
-    })
+  beforeEach(async function () {
+    tmpDir = resolvePath('tmp/netrc-handler-batch')
+    await fs.mkdirp(tmpDir)
+    netrcPath = resolvePath(tmpDir, `n-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    await fs.writeFile(netrcPath, '', 'utf8')
+  })
 
-    afterEach(async function () {
-      await fs.remove(tmpDir)
-    })
+  afterEach(async function () {
+    sinon.restore()
+    await fs.remove(tmpDir)
+  })
 
-    it('saveAuthForHosts writes multiple hosts with a single save', async function () {
-      let loadCalls = 0
-      let saveCalls = 0
-      const handler = new NetrcHandler(netrcPath)
-      const origLoad = handler.netrc.load.bind(handler.netrc)
-      const origSave = handler.netrc.save.bind(handler.netrc)
-      handler.netrc.load = async () => {
-        loadCalls++
-        return origLoad()
-      }
+  it('saveAuthForHosts writes multiple hosts to disk with a single load and save', async function () {
+    const handler = new NetrcHandler(netrcPath)
+    const load = sinon.spy(handler.netrc, 'load')
+    const save = sinon.spy(handler.netrc, 'save')
 
-      handler.netrc.save = async () => {
-        saveCalls++
-        return origSave()
-      }
+    await handler.saveAuthForHosts({login: 'u@e.com', password: 'tok'}, ['a.com', 'b.com'])
+    expect(load.callCount).to.equal(1)
+    expect(save.callCount).to.equal(1)
+    const persisted = new NetrcHandler(netrcPath)
+    await persisted.netrc.load()
+    expect(persisted.netrc.machines['a.com']).to.deep.equal({login: 'u@e.com', password: 'tok'})
+    expect(persisted.netrc.machines['b.com']).to.deep.equal({login: 'u@e.com', password: 'tok'})
+  })
 
-      await handler.saveAuthForHosts({login: 'u@e.com', password: 'tok'}, ['a.com', 'b.com'])
-      expect(loadCalls).to.equal(1)
-      expect(saveCalls).to.equal(1)
-      expect(handler.netrc.machines['a.com']).to.deep.equal({login: 'u@e.com', password: 'tok'})
-      expect(handler.netrc.machines['b.com']).to.deep.equal({login: 'u@e.com', password: 'tok'})
-    })
-
+  describe('batch validation and conditional removal', function () {
     for (const hosts of [[], [''], ['   '], ['a.com', '']]) {
       it(`saveAuthForHosts rejects invalid hosts ${JSON.stringify(hosts)} before loading netrc`, async function () {
         let loadCalls = 0
@@ -283,8 +291,7 @@ machine different.heroku.com login second@e.com password newer-token
   })
 })
 
-// Child-process tests intentionally use a second top-level suite so the prototype stubs above cannot affect them.
-/* eslint-disable mocha/max-top-level-suites */
+// Child-process tests intentionally use another top-level suite so the prototype stubs above cannot affect them.
 describe('NetrcHandler cross-process mutations', function () {
   const workerTimeoutMs = 30_000
   const children = new Set<ChildProcess>()
@@ -303,7 +310,6 @@ describe('NetrcHandler cross-process mutations', function () {
 
   afterEach(async function () {
     sinon.restore()
-    for (const hook of Object.keys(netrcLockTestHooks) as Array<keyof typeof netrcLockTestHooks>) delete netrcLockTestHooks[hook]
     await Promise.all([...children].map(child => new Promise<void>(resolve => {
       const cleanupTimeout = setTimeout(resolve, 2000)
       child.once('close', () => {
@@ -447,15 +453,13 @@ describe('NetrcHandler cross-process mutations', function () {
 
   it('recovers a stale lock left by a crashed process', async function () {
     const lockPath = `${netrcPath}.lock`
-    await fs.mkdir(lockPath)
-    await fs.writeJson(join(lockPath, 'owner.json'), {
+    const old = new Date(Date.now() - 60_000)
+    await writeLockOwner(lockPath, {
       createdAt: Date.now() - 60_000,
       hostname: os.hostname(),
       nonce: 'crashed-owner',
       pid: 2_147_483_647,
-    })
-    const old = new Date(Date.now() - 60_000)
-    await fs.utimes(join(lockPath, 'owner.json'), old, old)
+    }, old)
 
     await new NetrcHandler(netrcPath).saveAuth({login: 'new@example.com', password: 'new-token'}, 'new.heroku.test')
 
@@ -482,16 +486,14 @@ describe('NetrcHandler cross-process mutations', function () {
 
   it('recovers an abandoned lock carrying this process PID but no active in-process nonce', async function () {
     const lockPath = `${netrcPath}.lock`
-    await fs.mkdir(lockPath)
-    await fs.writeJson(join(lockPath, 'owner.json'), {
+    const old = new Date(Date.now() - 60_000)
+    await writeLockOwner(lockPath, {
       createdAt: Date.now() - 60_000,
       hostname: os.hostname(),
       nonce: 'live-owner',
       pid: process.pid,
       processStartedAt: Date.now() - (process.uptime() * 1000),
-    })
-    const old = new Date(Date.now() - 60_000)
-    await fs.utimes(join(lockPath, 'owner.json'), old, old)
+    }, old)
 
     await new NetrcHandler(netrcPath).saveAuth(
       {login: 'new@example.com', password: 'new-token'},
@@ -505,45 +507,52 @@ describe('NetrcHandler cross-process mutations', function () {
     const lockPath = `${netrcPath}.lock`
     const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], {stdio: 'ignore'})
     children.add(live)
-    await fs.mkdir(lockPath)
-    await fs.writeJson(join(lockPath, 'owner.json'), {
+    const old = new Date(Date.now() - 60_000)
+    await writeLockOwner(lockPath, {
       createdAt: Date.now() - 60_000,
       hostname: os.hostname(),
       nonce: 'paused-live-owner',
-      pid: live.pid,
-    })
-    const old = new Date(Date.now() - 60_000)
-    await fs.utimes(join(lockPath, 'owner.json'), old, old)
-    netrcLockTestHooks.lockTimeoutMs = 100
+      pid: live.pid!,
+    }, old)
 
-    await expect(new NetrcHandler(netrcPath).saveAuth(
+    let settled = false
+    const mutation = new NetrcHandler(netrcPath).saveAuth(
       {login: 'new@example.com', password: 'new-token'},
       'new.heroku.test',
-    )).to.be.rejectedWith('Timed out waiting for netrc lock')
+    ).finally(() => {
+      settled = true
+    })
+    await new Promise(resolve => {
+      setTimeout(resolve, 250)
+    })
 
-    expect(await fs.readJson(join(lockPath, 'owner.json'))).to.include({nonce: 'paused-live-owner'})
+    expect(settled).to.equal(false)
+    expect(await fs.readJson(lockPath)).to.include({nonce: 'paused-live-owner'})
+    live.kill('SIGKILL')
+    await mutation
   })
 
   it('does not reclaim an old owner when its PID may have been reused', async function () {
     const lockPath = `${netrcPath}.lock`
-    await fs.mkdir(lockPath)
-    await fs.writeJson(join(lockPath, 'owner.json'), {
+    const old = new Date(Date.now() - 60_000)
+    await writeLockOwner(lockPath, {
       createdAt: Date.now() - 60_000,
       hostname: os.hostname(),
       nonce: 'possibly-reused-pid',
       pid: process.pid,
       processStartedAt: Date.now() - (process.uptime() * 1000) - 60_000,
-    })
-    const old = new Date(Date.now() - 60_000)
-    await fs.utimes(join(lockPath, 'owner.json'), old, old)
-    netrcLockTestHooks.lockTimeoutMs = 100
+    }, old)
+    const startedAt = Date.now()
+    let nowCalls = 0
+    sinon.stub(Date, 'now').callsFake(() => nowCalls++ === 0 ? startedAt : startedAt + 11_000)
 
-    await expect(new NetrcHandler(netrcPath).saveAuth(
+    const mutation = new NetrcHandler(netrcPath).saveAuth(
       {login: 'new@example.com', password: 'new-token'},
       'new.heroku.test',
-    )).to.be.rejectedWith('Timed out waiting for netrc lock')
+    )
+    await expect(mutation).to.be.rejectedWith('Timed out waiting for netrc lock')
 
-    expect(await fs.readJson(join(lockPath, 'owner.json'))).to.include({nonce: 'possibly-reused-pid'})
+    expect(await fs.readJson(lockPath)).to.include({nonce: 'possibly-reused-pid'})
   })
 
   it('keeps a contender from loading old state at the destination rename boundary', async function () {
@@ -602,141 +611,137 @@ describe('NetrcHandler cross-process mutations', function () {
   it('does not delete a replacement owner during a forced stale-break interleaving', async function () {
     const lockPath = `${netrcPath}.lock`
     const displaced = `${lockPath}.displaced`
-    await fs.mkdir(lockPath)
-    await fs.writeJson(join(lockPath, 'owner.json'), {
+    const old = new Date(Date.now() - 60_000)
+    await writeLockOwner(lockPath, {
       createdAt: Date.now() - 60_000,
       hostname: os.hostname(),
       nonce: 'stale-owner',
       pid: 2_147_483_647,
-    })
-    const old = new Date(Date.now() - 60_000)
-    await fs.utimes(join(lockPath, 'owner.json'), old, old)
-    netrcLockTestHooks.lockTimeoutMs = 100
-    netrcLockTestHooks.beforeQuarantine = async (_path, reason) => {
-      if (reason !== 'stale' || await fs.pathExists(displaced)) return
-      await fs.rename(lockPath, displaced)
-      await fs.mkdir(lockPath)
-      await fs.writeJson(join(lockPath, 'owner.json'), {
-        createdAt: Date.now(),
-        hostname: 'remote-active-owner',
-        nonce: 'replacement-owner',
-        pid: 1234,
-      })
-    }
+    }, old)
+    const rename = nativeFs.promises.rename.bind(nativeFs.promises)
+    sinon.stub(nativeFs.promises, 'rename').callsFake(async (source, destination) => {
+      if (source === lockPath && String(destination).startsWith(`${lockPath}.quarantine.`) && !await fs.pathExists(displaced)) {
+        await rename(lockPath, displaced)
+        await writeLockOwner(lockPath, {
+          createdAt: Date.now(), hostname: 'remote-active-owner', nonce: 'replacement-owner', pid: 1234,
+        })
+      }
 
-    await expect(new NetrcHandler(netrcPath).saveAuth(
+      return rename(source, destination)
+    })
+    const startedAt = Date.now()
+    let nowCalls = 0
+    sinon.stub(Date, 'now').callsFake(() => nowCalls++ === 0 ? startedAt : startedAt + 11_000)
+
+    const mutation = new NetrcHandler(netrcPath).saveAuth(
       {login: 'new@example.com', password: 'new-token'},
       'new.heroku.test',
-    )).to.be.rejectedWith('Timed out waiting for netrc lock')
+    )
+    await expect(mutation).to.be.rejectedWith('Timed out waiting for netrc lock')
 
-    expect(await fs.readJson(join(lockPath, 'owner.json'))).to.include({nonce: 'replacement-owner'})
-    expect(await fs.readJson(join(displaced, 'owner.json'))).to.include({nonce: 'stale-owner'})
+    expect(await fs.readJson(lockPath)).to.include({nonce: 'replacement-owner'})
+    expect(await fs.readJson(displaced)).to.include({nonce: 'stale-owner'})
   })
 
   it('commits successfully but reports release failure without unlinking a replacement owner', async function () {
     const lockPath = `${netrcPath}.lock`
     const displaced = `${lockPath}.displaced`
-    netrcLockTestHooks.beforeQuarantine = async (_path, reason) => {
-      if (reason !== 'release') return
-      netrcLockTestHooks.beforeQuarantine = undefined
-      await fs.rename(lockPath, displaced)
-      await fs.mkdir(lockPath)
-      await fs.writeJson(join(lockPath, 'owner.json'), {
-        createdAt: Date.now(), hostname: 'remote-active-owner', nonce: 'replacement-owner', pid: 1234,
-      })
+    const rename = nativeFs.promises.rename.bind(nativeFs.promises)
+    let netrcCommitted = false
+    sinon.stub(nativeFs.promises, 'rename').callsFake(async (source, destination) => {
+      if (destination === netrcPath) netrcCommitted = true
+      if (netrcCommitted && source === lockPath && String(destination).startsWith(`${lockPath}.quarantine.`)) {
+        netrcCommitted = false
+        await rename(lockPath, displaced)
+        await writeLockOwner(lockPath, {
+          createdAt: Date.now(), hostname: 'remote-active-owner', nonce: 'replacement-owner', pid: 1234,
+        })
+      }
+
+      return rename(source, destination)
+    })
+
+    let failure: unknown
+    try {
+      await new NetrcHandler(netrcPath).saveAuth(
+        {login: 'new@example.com', password: 'new-token'},
+        'new.heroku.test',
+      )
+    } catch (error) {
+      failure = error
     }
 
-    await expect(new NetrcHandler(netrcPath).saveAuth(
-      {login: 'new@example.com', password: 'new-token'},
-      'new.heroku.test',
-    )).to.be.rejectedWith('ownership was lost before release')
-
+    expect(failure).to.be.instanceOf(NetrcPostCommitError)
+    expect((failure as NetrcPostCommitError).cause).to.be.an('error').with.property('message').that.includes('ownership was lost before release')
     expect(await fs.readFile(netrcPath, 'utf8')).to.contain('machine new.heroku.test')
-    expect(await fs.readJson(join(lockPath, 'owner.json'))).to.include({nonce: 'replacement-owner'})
+    expect(await fs.readJson(lockPath)).to.include({nonce: 'replacement-owner'})
+    expect(await fs.readJson(displaced)).to.have.property('nonce')
+  })
+
+  it('reports an ordinary release error when a no-op removal did not commit', async function () {
+    const lockPath = `${netrcPath}.lock`
+    const displaced = `${lockPath}.displaced`
+    const rename = nativeFs.promises.rename.bind(nativeFs.promises)
+    sinon.stub(nativeFs.promises, 'rename').callsFake(async (source, destination) => {
+      if (source === lockPath && String(destination).startsWith(`${lockPath}.quarantine.`)) {
+        await rename(lockPath, displaced)
+        await writeLockOwner(lockPath, {
+          createdAt: Date.now(), hostname: 'remote-active-owner', nonce: 'replacement-owner', pid: 1234,
+        })
+      }
+
+      return rename(source, destination)
+    })
+
+    let failure: unknown
+    try {
+      await new NetrcHandler(netrcPath).removeAuth('absent.heroku.test')
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).to.be.instanceOf(Error)
+    expect(failure).not.to.be.instanceOf(NetrcPostCommitError)
+    expect((failure as Error).message).to.include('ownership was lost before release')
+    expect(await fs.readFile(netrcPath, 'utf8')).to.equal('')
+    expect(await fs.readJson(lockPath)).to.include({nonce: 'replacement-owner'})
   })
 
   it('aborts before commit when the owner lock is replaced immediately before ownership assertion', async function () {
     const lockPath = `${netrcPath}.lock`
     const displaced = `${lockPath}.displaced`
     const original = await fs.readFile(netrcPath, 'utf8')
-    netrcLockTestHooks.beforeOwnershipCheck = async () => {
-      netrcLockTestHooks.beforeOwnershipCheck = undefined
+    const handler = new NetrcHandler(netrcPath)
+    const save = handler.netrc.save.bind(handler.netrc)
+    handler.netrc.save = async assertOwned => {
       await fs.rename(lockPath, displaced)
-      await fs.mkdir(lockPath)
-      await fs.writeJson(join(lockPath, 'owner.json'), {
+      await writeLockOwner(lockPath, {
         createdAt: Date.now(), hostname: 'remote-active-owner', nonce: 'replacement-owner', pid: 1234,
       })
+      return save(assertOwned)
     }
 
-    await expect(new NetrcHandler(netrcPath).saveAuth(
-      {login: 'new@example.com', password: 'new-token'},
-      'new.heroku.test',
-    )).to.be.rejectedWith('Netrc mutation failed and lock release also failed')
+    let failure: unknown
+    try {
+      await handler.saveAuth(
+        {login: 'new@example.com', password: 'new-token'},
+        'new.heroku.test',
+      )
+    } catch (error) {
+      failure = error
+    }
 
+    expect(failure).to.be.instanceOf(AggregateError)
+    const aggregate = failure as AggregateError
+    expect(aggregate.message).to.equal('Netrc mutation failed and lock release also failed')
+    expect(aggregate.errors).to.have.length(2)
+    expect(aggregate.errors[0]).to.be.an('error').with.property('message').that.includes('Netrc lock ownership was lost')
+    expect(aggregate.errors[0]).not.to.be.instanceOf(NetrcPostCommitError)
+    expect(aggregate.errors[1]).to.be.an('error').with.property('message').that.includes('ownership was lost before release')
+    expect(aggregate.cause).to.equal(aggregate.errors[0])
     expect(await fs.readFile(netrcPath, 'utf8')).to.equal(original)
-    expect(await fs.readJson(join(lockPath, 'owner.json'))).to.include({nonce: 'replacement-owner'})
+    expect(await fs.readJson(lockPath)).to.include({nonce: 'replacement-owner'})
     expect((await fs.readdir(tmpDir)).filter(entry => entry.endsWith('.tmp'))).to.deep.equal([])
-  })
-
-  it('never recursively removes unexpected contents after owner setup failure', async function () {
-    netrcLockTestHooks.beforeOwnerCreate = async path => {
-      await fs.writeFile(`${path}.unexpected`, 'preserve me')
-      throw new Error('owner setup failed')
-    }
-
-    await expect(new NetrcHandler(netrcPath).saveAuth(
-      {login: 'new@example.com', password: 'new-token'},
-      'new.heroku.test',
-    )).to.be.rejectedWith('owner setup failed')
-
-    const unexpected = (await fs.readdir(tmpDir)).find(entry => entry.endsWith('.tmp.unexpected'))
-    expect(unexpected).to.be.a('string')
-    expect(await fs.readFile(join(tmpDir, unexpected!), 'utf8')).to.equal('preserve me')
-    expect(await fs.pathExists(`${netrcPath}.lock`)).to.equal(false)
-  })
-
-  it('recovers an old incomplete lock left before owner metadata was durable', async function () {
-    const lockPath = `${netrcPath}.lock`
-    await fs.mkdir(lockPath)
-    const old = new Date(Date.now() - 60_000)
-    await fs.utimes(lockPath, old, old)
-
-    await new NetrcHandler(netrcPath).saveAuth({login: 'new@example.com', password: 'new-token'}, 'new.heroku.test')
-
-    expect(await fs.pathExists(lockPath)).to.equal(false)
-    const verifier = new NetrcHandler(netrcPath)
-    await verifier.netrc.load()
-    expect(verifier.netrc.machines['new.heroku.test']?.password).to.equal('new-token')
-  })
-
-  it('recovers an old lock with truncated owner metadata', async function () {
-    const lockPath = `${netrcPath}.lock`
-    await fs.mkdir(lockPath)
-    const ownerPath = join(lockPath, 'owner.json')
-    await fs.writeFile(ownerPath, '{"pid":')
-    const old = new Date(Date.now() - 60_000)
-    await fs.utimes(ownerPath, old, old)
-
-    await new NetrcHandler(netrcPath).saveAuth({login: 'new@example.com', password: 'new-token'}, 'new.heroku.test')
-
-    expect(await fs.pathExists(lockPath)).to.equal(false)
-  })
-
-  it('refuses to break a stale lock containing unexpected files', async function () {
-    const lockPath = `${netrcPath}.lock`
-    await fs.mkdir(lockPath)
-    await fs.writeFile(join(lockPath, 'unexpected'), 'do not delete')
-    const old = new Date(Date.now() - 60_000)
-    await fs.utimes(lockPath, old, old)
-
-    await expect(new NetrcHandler(netrcPath).saveAuth(
-      {login: 'new@example.com', password: 'new-token'},
-      'new.heroku.test',
-    )).to.be.rejectedWith('Refusing to remove netrc lock with unexpected contents')
-
-    const quarantine = (await fs.readdir(tmpDir)).find(entry => entry.startsWith('netrc.lock.quarantine.'))
-    expect(quarantine).to.be.a('string')
-    expect(await fs.readFile(join(tmpDir, quarantine!, 'unexpected'), 'utf8')).to.equal('do not delete')
   })
 
   it('refuses a symlinked netrc target without reading or modifying its destination', async function () {
@@ -759,16 +764,15 @@ describe('NetrcHandler cross-process mutations', function () {
     if (process.platform === 'win32') this.skip()
     const lockPath = `${netrcPath}.lock`
     const destination = join(tmpDir, 'lock-destination')
-    await fs.mkdir(destination)
-    await fs.writeFile(join(destination, 'sentinel'), 'unchanged')
-    await fs.symlink(destination, lockPath, 'dir')
+    await fs.writeFile(destination, 'unchanged')
+    await fs.symlink(destination, lockPath, 'file')
 
     await expect(new NetrcHandler(netrcPath).saveAuth(
       {login: 'new@example.com', password: 'new-token'},
       'new.heroku.test',
     )).to.be.rejectedWith('Refusing to use symlinked netrc lock')
 
-    expect(await fs.readFile(join(destination, 'sentinel'), 'utf8')).to.equal('unchanged')
+    expect(await fs.readFile(destination, 'utf8')).to.equal('unchanged')
     expect((await fs.lstat(lockPath)).isSymbolicLink()).to.equal(true)
   })
 })

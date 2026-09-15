@@ -205,3 +205,4 @@ export type {
 } from './lib/netrc-parser.js'
 export type {AuthEntry, KeychainAuthEntry, NetrcAuthEntry} from './lib/types.js'
 export {NativeCredentialNotFoundError} from './native-credential-not-found-error.js'
+export {NetrcPostCommitError} from './netrc-post-commit-error.js'

@@ -556,6 +556,7 @@ describe('credential-manager', function () {
     })
 
     it('contextualizes a root remove marker after one structural validation read', async function () {
+      sinon.stub(MacOSHandler.prototype, 'removeAuth')
       const sensitivePath = '/Users/stateful-remove/.netrc'
       let operationReads = 0
       const marker = Object.assign(new Error('Committed removal failed afterward'), {

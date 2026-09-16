@@ -11,7 +11,6 @@ import {NetrcPostCommitError} from '../netrc-post-commit-error.js'
 
 const credDebug = debug('heroku-credential-manager')
 const lockPollMs = 50
-const lockStaleMs = 30_000
 const lockTimeoutMs = 10_000
 const activeNonces = new Set<string>()
 const processStartedAt = Date.now() - (process.uptime() * 1000)
@@ -35,7 +34,6 @@ type LockObservation = {
   identity: FileIdentity
   owner: LockOwner
   ownerIdentity: FileIdentity
-  updatedAt: number
 }
 
 type MutationLock = {
@@ -102,7 +100,7 @@ async function readLockOwner(lockPath: string): Promise<LockObservation> {
 
     if (!validOwner(parsed)) throw new Error(`Invalid netrc lock owner metadata: ${lockPath}`)
     return {
-      identity: identity(lockStats), owner: parsed, ownerIdentity: identity(stats), updatedAt: stats.mtimeMs,
+      identity: identity(lockStats), owner: parsed, ownerIdentity: identity(stats),
     }
   } finally {
     await handle?.close()
@@ -119,15 +117,10 @@ function processIsRunning(pid: number): boolean {
 }
 
 function lockCanBeReclaimed(observed: LockObservation): boolean {
-  const {owner, updatedAt} = observed
+  const {owner} = observed
   if (owner.hostname !== os.hostname()) return false
-  if (owner.pid === process.pid) {
-    const belongsToThisProcess = owner.processStartedAt !== undefined
-      && Math.abs(owner.processStartedAt - processStartedAt) < 1000
-    return belongsToThisProcess
-      && Date.now() - Math.max(updatedAt, owner.createdAt) >= lockStaleMs
-      && !activeNonces.has(owner.nonce)
-  }
+  // Another copy of this module may own the same-process lock.
+  if (owner.pid === process.pid) return false
 
   // A live PID may be the owner or a reused PID. In either case it is not safe to steal.
   return !processIsRunning(owner.pid)
@@ -184,6 +177,8 @@ async function cleanUpPublishedLock(lockPath: string, nonce: string): Promise<vo
   if (observed.owner.nonce === nonce) await quarantineObservedLock(lockPath, observed)
 }
 
+// Lock acquisition necessarily coordinates publication, cleanup, contention, and stale recovery.
+// eslint-disable-next-line complexity
 async function acquireLock(file: string): Promise<MutationLock> {
   const lockPath = `${file}.lock`
   const startedAt = Date.now()
@@ -200,22 +195,79 @@ async function acquireLock(file: string): Promise<MutationLock> {
     }
     const candidatePath = `${lockPath}.owner.${process.pid}.${owner.nonce}.tmp`
     let ownerHandle: fs.promises.FileHandle | undefined
+    let candidateCreated = false
+    let candidateCloseAttempted = false
+    let acquired: LockObservation | undefined
     let published = false
+    let contended = false
+    const failures: unknown[] = []
     try {
       // eslint-disable-next-line no-bitwise
       ownerHandle = await fs.promises.open(candidatePath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | noFollowFlag(), 0o600)
+      candidateCreated = true
       await ownerHandle.writeFile(JSON.stringify(owner))
       await ownerHandle.sync()
+      candidateCloseAttempted = true
       await ownerHandle.close()
       ownerHandle = undefined
-      await fs.promises.link(candidatePath, lockPath)
-      published = true
-      activeNonces.add(owner.nonce)
-      const acquired = await readLockOwner(lockPath)
-      if (acquired.owner.nonce !== owner.nonce) {
-        throw new Error(`Netrc lock ownership was compromised during acquisition: ${lockPath}`)
+      try {
+        await fs.promises.link(candidatePath, lockPath)
+        published = true
+        activeNonces.add(owner.nonce)
+      } catch (error) {
+        if (isFileSystemError(error, 'EEXIST')) contended = true
+        else throw error
       }
 
+      if (published) {
+        acquired = await readLockOwner(lockPath)
+        if (acquired.owner.nonce !== owner.nonce) {
+          throw new Error(`Netrc lock ownership was compromised during acquisition: ${lockPath}`)
+        }
+      }
+    } catch (error) {
+      failures.push(error)
+    }
+
+    if (ownerHandle) {
+      try {
+        await ownerHandle.close()
+      } catch (error) {
+        failures.push(error)
+        if (!candidateCloseAttempted) {
+          // eslint-disable-next-line max-depth
+          try {
+            await ownerHandle.close()
+          } catch (retryError) {
+            failures.push(retryError)
+          }
+        }
+      }
+    }
+
+    if (candidateCreated) {
+      try {
+        await fs.promises.unlink(candidatePath)
+      } catch (error) {
+        if (!isFileSystemError(error, 'ENOENT')) failures.push(error)
+      }
+    }
+
+    if (published && failures.length > 0) {
+      activeNonces.delete(owner.nonce)
+      try {
+        await cleanUpPublishedLock(lockPath, owner.nonce)
+      } catch (error) {
+        failures.push(error)
+      }
+    }
+
+    if (failures.length === 1) throw failures[0]
+    if (failures.length > 1) {
+      throw new AggregateError(failures, 'Failed to initialize and clean up netrc lock', {cause: failures[0]})
+    }
+
+    if (acquired) {
       const assertOwned = async () => {
         const current = await readLockOwner(lockPath)
         if (!sameIdentity(current.identity, acquired.identity)
@@ -240,28 +292,9 @@ async function acquireLock(file: string): Promise<MutationLock> {
           }
         },
       }
-    } catch (error) {
-      if (published) {
-        activeNonces.delete(owner.nonce)
-        try {
-          await cleanUpPublishedLock(lockPath, owner.nonce)
-        } catch (cleanupError) {
-          throw new AggregateError([error, cleanupError], 'Failed to initialize and clean up netrc lock', {cause: error})
-        }
-      }
-
-      if (!isFileSystemError(error, 'EEXIST')) throw error
-    } finally {
-      await ownerHandle?.close()
-      try {
-        await fs.promises.unlink(candidatePath)
-      } catch (error) {
-        // Candidate cleanup must not hide an acquisition/release error, but a standalone cleanup
-        // failure is still actionable and must not be silently ignored.
-        // eslint-disable-next-line no-unsafe-finally
-        if (!isFileSystemError(error, 'ENOENT')) throw error
-      }
     }
+
+    if (!contended) throw new Error(`Netrc lock acquisition failed without an error: ${lockPath}`)
 
     let observed: LockObservation
     try {

@@ -484,7 +484,7 @@ describe('NetrcHandler cross-process mutations', function () {
     expect(verifier.netrc.machines['crashed.heroku.test']).to.equal(undefined)
   })
 
-  it('recovers an abandoned lock carrying this process PID but no active in-process nonce', async function () {
+  it('fails closed for an old same-process lock that may belong to another loaded module or realm', async function () {
     const lockPath = `${netrcPath}.lock`
     const old = new Date(Date.now() - 60_000)
     await writeLockOwner(lockPath, {
@@ -494,13 +494,17 @@ describe('NetrcHandler cross-process mutations', function () {
       pid: process.pid,
       processStartedAt: Date.now() - (process.uptime() * 1000),
     }, old)
+    const startedAt = Date.now()
+    let nowCalls = 0
+    sinon.stub(Date, 'now').callsFake(() => nowCalls++ === 0 ? startedAt : startedAt + 11_000)
 
-    await new NetrcHandler(netrcPath).saveAuth(
+    const mutation = new NetrcHandler(netrcPath).saveAuth(
       {login: 'new@example.com', password: 'new-token'},
       'new.heroku.test',
     )
+    await expect(mutation).to.be.rejectedWith('Timed out waiting for netrc lock')
 
-    expect(await fs.pathExists(lockPath)).to.equal(false)
+    expect(await fs.readJson(lockPath)).to.include({nonce: 'live-owner'})
   })
 
   it('does not steal an old lock while its same-host owner PID is alive', async function () {
@@ -553,6 +557,119 @@ describe('NetrcHandler cross-process mutations', function () {
     await expect(mutation).to.be.rejectedWith('Timed out waiting for netrc lock')
 
     expect(await fs.readJson(lockPath)).to.include({nonce: 'possibly-reused-pid'})
+  })
+
+  it('rolls back a published lock when candidate unlink fails and permits the next mutation', async function () {
+    const lockPath = `${netrcPath}.lock`
+    const unlink = nativeFs.promises.unlink.bind(nativeFs.promises)
+    let failedCandidateUnlink = false
+    sinon.stub(nativeFs.promises, 'unlink').callsFake(async path => {
+      if (!failedCandidateUnlink && String(path).startsWith(`${lockPath}.owner.`) && String(path).endsWith('.tmp')) {
+        failedCandidateUnlink = true
+        throw Object.assign(new Error('candidate unlink failed'), {code: 'EACCES'})
+      }
+
+      return unlink(path)
+    })
+
+    await expect(new NetrcHandler(netrcPath).saveAuth(
+      {login: 'first@example.com', password: 'first-token'},
+      'first.heroku.test',
+    )).to.be.rejectedWith('candidate unlink failed')
+
+    expect(await fs.pathExists(lockPath)).to.equal(false)
+    expect((await fs.readdir(tmpDir)).filter(entry => entry.includes('.owner.'))).to.have.length(1)
+
+    await new NetrcHandler(netrcPath).saveAuth(
+      {login: 'second@example.com', password: 'second-token'},
+      'second.heroku.test',
+    )
+    expect(await fs.pathExists(lockPath)).to.equal(false)
+    const verifier = new NetrcHandler(netrcPath)
+    await verifier.netrc.load()
+    expect(verifier.netrc.machines['second.heroku.test']?.password).to.equal('second-token')
+  })
+
+  it('propagates EEXIST from candidate sync instead of treating it as lock contention', async function () {
+    const lockPath = `${netrcPath}.lock`
+    const open = nativeFs.promises.open.bind(nativeFs.promises)
+    const link = sinon.spy(nativeFs.promises, 'link')
+    let injectedFailure = false
+    sinon.stub(nativeFs.promises, 'open').callsFake(async (...arguments_: Parameters<typeof nativeFs.promises.open>) => {
+      const handle = await open(...arguments_)
+      if (!injectedFailure && String(arguments_[0]).startsWith(`${lockPath}.owner.`)) {
+        injectedFailure = true
+        sinon.stub(handle, 'sync').rejects(Object.assign(new Error('candidate sync EEXIST'), {code: 'EEXIST'}))
+      }
+
+      return handle
+    })
+
+    await expect(new NetrcHandler(netrcPath).saveAuth(
+      {login: 'first@example.com', password: 'first-token'},
+      'first.heroku.test',
+    )).to.be.rejectedWith('candidate sync EEXIST')
+
+    expect(link.callCount).to.equal(0)
+    expect(await fs.pathExists(lockPath)).to.equal(false)
+    expect((await fs.readdir(tmpDir)).filter(entry => entry.includes('.owner.'))).to.deep.equal([])
+  })
+
+  it('retries cleanup close after a pre-link failure and preserves both failures', async function () {
+    const lockPath = `${netrcPath}.lock`
+    const open = nativeFs.promises.open.bind(nativeFs.promises)
+    let close: sinon.SinonStub | undefined
+    sinon.stub(nativeFs.promises, 'open').callsFake(async (...arguments_: Parameters<typeof nativeFs.promises.open>) => {
+      const handle = await open(...arguments_)
+      if (!close && String(arguments_[0]).startsWith(`${lockPath}.owner.`)) {
+        sinon.stub(handle, 'sync').rejects(new Error('candidate sync failed'))
+        close = sinon.stub(handle, 'close').callThrough()
+        close.onFirstCall().rejects(new Error('candidate close failed'))
+      }
+
+      return handle
+    })
+
+    let failure: unknown
+    try {
+      await new NetrcHandler(netrcPath).saveAuth(
+        {login: 'first@example.com', password: 'first-token'},
+        'first.heroku.test',
+      )
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).to.be.instanceOf(AggregateError)
+    const aggregate = failure as AggregateError
+    expect((aggregate.errors[0] as Error).message).to.equal('candidate sync failed')
+    expect((aggregate.errors[1] as Error).message).to.equal('candidate close failed')
+    expect(close?.callCount).to.equal(2)
+    expect((await fs.readdir(tmpDir)).filter(entry => entry.includes('.owner.'))).to.deep.equal([])
+  })
+
+  it('does not delete a pre-existing candidate when exclusive open reports EEXIST', async function () {
+    const lockPath = `${netrcPath}.lock`
+    const open = nativeFs.promises.open.bind(nativeFs.promises)
+    let candidatePath: string | undefined
+    sinon.stub(nativeFs.promises, 'open').callsFake(async (...arguments_: Parameters<typeof nativeFs.promises.open>) => {
+      const path = String(arguments_[0])
+      if (!candidatePath && path.startsWith(`${lockPath}.owner.`)) {
+        candidatePath = path
+        await fs.writeFile(path, 'pre-existing candidate', {flag: 'wx'})
+      }
+
+      return open(...arguments_)
+    })
+
+    await expect(new NetrcHandler(netrcPath).saveAuth(
+      {login: 'first@example.com', password: 'first-token'},
+      'first.heroku.test',
+    )).to.be.rejectedWith('EEXIST')
+
+    expect(candidatePath).not.to.equal(undefined)
+    expect(await fs.readFile(candidatePath!, 'utf8')).to.equal('pre-existing candidate')
+    expect(await fs.pathExists(lockPath)).to.equal(false)
   })
 
   it('keeps a contender from loading old state at the destination rename boundary', async function () {
@@ -673,8 +790,68 @@ describe('NetrcHandler cross-process mutations', function () {
 
     expect(failure).to.be.instanceOf(NetrcPostCommitError)
     expect((failure as NetrcPostCommitError).cause).to.be.an('error').with.property('message').that.includes('ownership was lost before release')
-    expect(await fs.readFile(netrcPath, 'utf8')).to.contain('machine new.heroku.test')
+    const verifier = new NetrcHandler(netrcPath)
+    await verifier.netrc.load()
+    expect(verifier.netrc.machines['new.heroku.test']).to.deep.equal({
+      login: 'new@example.com',
+      password: 'new-token',
+    })
     expect(await fs.readJson(lockPath)).to.include({nonce: 'replacement-owner'})
+    expect(await fs.readJson(displaced)).to.have.property('nonce')
+  })
+
+  it('preserves post-commit save and lock-release failures without unlinking a replacement owner', async function () {
+    if (process.platform === 'win32') this.skip()
+    const lockPath = `${netrcPath}.lock`
+    const displaced = `${lockPath}.displaced`
+    const rename = nativeFs.promises.rename.bind(nativeFs.promises)
+    const open = nativeFs.promises.open.bind(nativeFs.promises)
+    const durabilityFailure = new Error('directory sync failed')
+    const replacementOwner = {
+      createdAt: Date.now(), hostname: 'remote-active-owner', nonce: 'replacement-owner', pid: 1234,
+    }
+    let netrcCommitted = false
+    sinon.stub(nativeFs.promises, 'open').callsFake(async (...arguments_: Parameters<typeof nativeFs.promises.open>) => {
+      const handle = await open(...arguments_)
+      if (String(arguments_[0]) === tmpDir) sinon.stub(handle, 'sync').rejects(durabilityFailure)
+      return handle
+    })
+    sinon.stub(nativeFs.promises, 'rename').callsFake(async (source, destination) => {
+      if (destination === netrcPath) netrcCommitted = true
+      if (netrcCommitted && source === lockPath && String(destination).startsWith(`${lockPath}.quarantine.`)) {
+        netrcCommitted = false
+        await rename(lockPath, displaced)
+        await writeLockOwner(lockPath, replacementOwner)
+      }
+
+      return rename(source, destination)
+    })
+
+    let failure: unknown
+    try {
+      await new NetrcHandler(netrcPath).saveAuth(
+        {login: 'new@example.com', password: 'new-token'},
+        'new.heroku.test',
+      )
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).to.be.instanceOf(AggregateError)
+    const aggregate = failure as AggregateError
+    expect(aggregate.message).to.equal('Netrc mutation failed and lock release also failed')
+    expect(aggregate.errors).to.have.length(2)
+    expect(aggregate.errors[0]).to.be.instanceOf(NetrcPostCommitError)
+    expect((aggregate.errors[0] as NetrcPostCommitError).cause).to.equal(durabilityFailure)
+    expect(aggregate.cause).to.equal(aggregate.errors[0])
+    expect(aggregate.errors[1]).to.be.an('error').with.property('message').that.includes('ownership was lost before release')
+    const verifier = new NetrcHandler(netrcPath)
+    await verifier.netrc.load()
+    expect(verifier.netrc.machines['new.heroku.test']).to.deep.equal({
+      login: 'new@example.com',
+      password: 'new-token',
+    })
+    expect(await fs.readJson(lockPath)).to.deep.equal(replacementOwner)
     expect(await fs.readJson(displaced)).to.have.property('nonce')
   })
 

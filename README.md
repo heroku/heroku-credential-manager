@@ -70,6 +70,8 @@ try {
 
 Top-level `removeAuth` uses a supplied account to guard `.netrc` entries by login. Passing `undefined` removes the supplied hosts regardless of stored login so callers can request unconditional host cleanup after storage-mode changes.
 
+If a `.netrc` mutation commits but a later step fails, the package throws a `NetrcPostCommitError`. `isNetrcPostCommitError(error)` checks only the supplied error node. When multiple failures occur, a post-commit marker may instead be nested in `AggregateError.errors` or `cause`.
+
 ### Injected login consumers
 
 Login is intentionally available only from the `/login` subpath. Consumers provide semantic prompts and may inject HTTP, browser opening, output/progress, timers, environment/config, and storage behavior. This keeps command frameworks and browser packages outside the credential manager:

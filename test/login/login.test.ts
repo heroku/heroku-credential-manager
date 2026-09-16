@@ -2,22 +2,24 @@ import {expect, use} from 'chai'
 import chaiAsPromised from 'chai-as-promised'
 import sinon from 'sinon'
 
-import type {
-  LoginBrowser,
-  LoginDependencies,
-  LoginEnvironment,
-  LoginHttp,
-  LoginHttpRequest,
-  LoginHttpResponse,
-  LoginOutput,
-  LoginProgress,
-  LoginPrompt,
-  LoginPromptSelection,
-  LoginStorage,
-  LoginTimers,
+import {NetrcPostCommitError, isNetrcPostCommitError} from '../../src/index.js'
+import {
+  Login,
+  type LoginBrowser,
+  LoginCancelledError,
+  type LoginDependencies,
+  type LoginEnvironment,
+  type LoginHttp,
+  LoginHttpError,
+  type LoginHttpRequest,
+  type LoginHttpResponse,
+  type LoginOutput,
+  type LoginProgress,
+  type LoginPrompt,
+  type LoginPromptSelection,
+  type LoginStorage,
+  type LoginTimers,
 } from '../../src/login/index.js'
-
-import {Login, LoginCancelledError, LoginHttpError} from '../../src/login/index.js'
 
 /* eslint-disable camelcase, mocha/max-top-level-suites, no-await-in-loop, unicorn/consistent-function-scoping */
 
@@ -162,15 +164,23 @@ function queueInteractive(http: FakeHttp, account = 'jöhn@example.com', token =
 function expectSafeErrorSurface(error: Error, sensitiveValues: readonly string[]): void {
   const inspected: string[] = []
   const seen = new Set<Error>()
-  let current: unknown = error
-  while (current instanceof Error && !seen.has(current)) {
+  const inspect = (current: unknown): void => {
+    if (!(current instanceof Error) || seen.has(current)) {
+      if (typeof current === 'string') inspected.push(current)
+      return
+    }
+
     seen.add(current)
     inspected.push(String(current), JSON.stringify(current), current.message, current.name)
     for (const key of Object.keys(current)) inspected.push(String((current as unknown as Record<string, unknown>)[key]))
-    current = current.cause
+    if (current instanceof AggregateError) {
+      for (const child of current.errors as unknown[]) inspect(child)
+    }
+
+    inspect(current.cause)
   }
 
-  if (typeof current === 'string') inspected.push(current)
+  inspect(error)
   const surface = inspected.join('\n')
   for (const value of sensitiveValues) {
     expect(surface).to.not.include(value)
@@ -1007,6 +1017,332 @@ describe('Login', function () {
         if (failingOperation === 'saveAuth') expect(writeLoginState.notCalled).to.be.true
       }
     })
+
+    const storagePaths = [
+      '"/Users/secret folder/.netrc"',
+      "'/Users/secret folder/.netrc'",
+      'path=/Users/secret/.netrc',
+      '~/.netrc',
+      '../private/.netrc',
+      'relative/private.netrc',
+      'C:\\Users\\secret\\.netrc',
+      '\\\\server\\share\\secret.netrc',
+    ]
+    for (const path of storagePaths) {
+      it(`preserves post-commit context without exposing storage path ${JSON.stringify(path)}`, async function () {
+        const account = 'saved-secret@example.com'
+        const token = 'saved-secret-token'
+        const cause = Object.assign(new Error(`release failed for ${account} with ${token} at ${path}`), {account, path, token})
+        const adapterError = Object.assign(new NetrcPostCommitError(
+          `Committed save for ${account} with ${token} at ${path}`,
+          {cause, operation: 'save'},
+        ), {account, path, token})
+        const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(adapterError)})})
+        queueInteractive(http, account, token)
+
+        const error = await login.login({method: 'interactive'}).catch(error => error as Error)
+
+        expect(error).to.not.equal(adapterError)
+        expect(isNetrcPostCommitError(error)).to.equal(true)
+        if (!isNetrcPostCommitError(error)) throw new Error('Expected post-commit marker')
+        expect(error.operation).to.equal('save')
+        expect(error.message).to.equal('Netrc mutation committed but a subsequent operation failed')
+        expect(error.cause).to.be.instanceOf(Error)
+        expect((error.cause as Error).message).to.equal('Credential storage operation failed')
+        expect(error).to.not.have.any.keys('account', 'path', 'token')
+        expect(error.cause).to.not.have.any.keys('account', 'path', 'token')
+        expectSafeErrorSurface(error, [account, token, path])
+      })
+    }
+
+    it('preserves sanitized aggregate child order and post-commit markers', async function () {
+      const account = 'aggregate-secret@example.com'
+      const token = 'aggregate-secret-token'
+      const path = '/Users/secret/.netrc'
+      const aggregate = Object.assign(new AggregateError([
+        Object.assign(new Error(`ordinary ${account} at ${path}`), {path, token}),
+        new NetrcPostCommitError(`committed ${token} at ${path}`, {
+          cause: Object.assign(new Error(`release ${account} at ${path}`), {path}),
+          operation: 'save',
+        }),
+        {account, path, token},
+      ], `aggregate ${account} at ${path}`, {cause: new Error(`root ${token} at ${path}`)}), {path, token})
+      const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(aggregate)})})
+      queueInteractive(http, account, token)
+
+      const error = await login.login({method: 'interactive'}).then(() => {
+        throw new Error('Expected failure')
+      }, error => error as AggregateError)
+
+      expect(error).to.be.instanceOf(AggregateError)
+      expect(error).to.not.equal(aggregate)
+      expect(error.message).to.equal('Credential storage operation failed')
+      expect(error.errors).to.have.length(3)
+      expect((error.errors[0] as Error).message).to.equal('Credential storage operation failed')
+      expect(isNetrcPostCommitError(error.errors[1])).to.equal(true)
+      expect((error.errors[1] as NetrcPostCommitError).operation).to.equal('save')
+      expect((error.errors[1] as Error).message).to.equal('Netrc mutation committed but a subsequent operation failed')
+      expect((error.errors[2] as Error).message).to.equal('Credential storage operation failed')
+      expect(error).to.not.have.any.keys('path', 'token')
+      expect(error.errors[0]).to.not.have.any.keys('path', 'token')
+      expectSafeErrorSurface(error, [account, token, path])
+    })
+
+    it('preserves one projected marker shared by aggregate cause and child', async function () {
+      const account = 'alias-secret@example.com'
+      const token = 'alias-secret-token'
+      const marker = new NetrcPostCommitError(`committed ${account} ${token}`, {operation: 'save'})
+      const aggregate = new AggregateError([new Error('ordinary'), marker], 'aggregate details', {cause: marker})
+      const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(aggregate)})})
+      queueInteractive(http, account, token)
+
+      const error = await login.login({method: 'interactive'}).then(() => {
+        throw new Error('Expected failure')
+      }, error => error as AggregateError)
+
+      expect(error.errors).to.have.length(2)
+      expect(error.errors[1]).to.equal(error.cause)
+      expect(isNetrcPostCommitError(error.errors[1])).to.equal(true)
+      expect((error.errors[1] as NetrcPostCommitError).operation).to.equal('save')
+      expectSafeErrorSurface(error, [account, token])
+    })
+
+    it('preserves multiple sibling post-commit markers and their order', async function () {
+      const first = new NetrcPostCommitError('first details', {operation: 'save'})
+      const second = new NetrcPostCommitError('second details', {operation: 'stale-cleanup'})
+      const aggregate = new AggregateError([first, new Error('ordinary details'), second], 'aggregate details')
+      const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(aggregate)})})
+      queueInteractive(http)
+
+      const error = await login.login({method: 'interactive'}).then(() => {
+        throw new Error('Expected failure')
+      }, error => error as AggregateError)
+
+      expect(error.errors).to.have.length(3)
+      expect(isNetrcPostCommitError(error.errors[0])).to.equal(true)
+      expect((error.errors[0] as NetrcPostCommitError).operation).to.equal('save')
+      expect((error.errors[1] as Error).message).to.equal('Credential storage operation failed')
+      expect(isNetrcPostCommitError(error.errors[2])).to.equal(true)
+      expect((error.errors[2] as NetrcPostCommitError).operation).to.equal('stale-cleanup')
+    })
+
+    it('preserves a marker in a later nested aggregate', async function () {
+      const marker = new NetrcPostCommitError('nested marker details', {operation: 'remove'})
+      const nested = new AggregateError([new Error('nested ordinary details'), marker], 'nested details')
+      const aggregate = new AggregateError([new Error('first ordinary details'), nested], 'outer details')
+      const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(aggregate)})})
+      queueInteractive(http)
+
+      const error = await login.login({method: 'interactive'}).then(() => {
+        throw new Error('Expected failure')
+      }, error => error as AggregateError)
+
+      expect(error.errors).to.have.length(2)
+      expect((error.errors[0] as Error).message).to.equal('Credential storage operation failed')
+      const projectedNested = error.errors[1] as AggregateError
+      expect(projectedNested).to.be.instanceOf(AggregateError)
+      expect(projectedNested.errors).to.have.length(2)
+      expect((projectedNested.errors[0] as Error).message).to.equal('Credential storage operation failed')
+      expect(isNetrcPostCommitError(projectedNested.errors[1])).to.equal(true)
+      expect((projectedNested.errors[1] as NetrcPostCommitError).operation).to.equal('remove')
+    })
+
+    it('preserves a post-commit marker whose cause is another marker', async function () {
+      const inner = new NetrcPostCommitError('inner details', {operation: 'remove'})
+      const outer = new NetrcPostCommitError('outer details', {cause: inner, operation: 'save'})
+      const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(outer)})})
+      queueInteractive(http)
+
+      const error = await login.login({method: 'interactive'}).then(() => {
+        throw new Error('Expected failure')
+      }, error => error as Error)
+
+      expect(isNetrcPostCommitError(error)).to.equal(true)
+      if (!isNetrcPostCommitError(error)) throw new Error('Expected outer post-commit marker')
+      expect(error.operation).to.equal('save')
+      expect(isNetrcPostCommitError(error.cause)).to.equal(true)
+      expect((error.cause as NetrcPostCommitError).operation).to.equal('remove')
+    })
+
+    it('preserves a marker reached through an aggregate ordinary Error child cause', async function () {
+      const marker = new NetrcPostCommitError('marker details', {operation: 'stale-cleanup'})
+      const wrapper = new Error('wrapper /Users/secret/.netrc', {cause: marker})
+      const aggregate = new AggregateError([new Error('first ordinary'), wrapper], 'aggregate details')
+      const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(aggregate)})})
+      queueInteractive(http)
+
+      const error = await login.login({method: 'interactive'}).then(() => {
+        throw new Error('Expected failure')
+      }, error => error as AggregateError)
+
+      expect(error.errors).to.have.length(2)
+      const projectedWrapper = error.errors[1] as Error
+      expect(projectedWrapper.message).to.equal('Credential storage operation failed')
+      expect(isNetrcPostCommitError(projectedWrapper.cause)).to.equal(true)
+      expect((projectedWrapper.cause as NetrcPostCommitError).operation).to.equal('stale-cleanup')
+      expectSafeErrorSurface(error, ['/Users/secret/.netrc'])
+    })
+
+    it('projects a sensitive ordinary root Error leading to a marker', async function () {
+      const path = '/Users/root-secret/.netrc'
+      const marker = new NetrcPostCommitError('marker details', {operation: 'save'})
+      const wrapper = new Error(`storage wrapper exposed ${path}`, {cause: marker})
+      const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(wrapper)})})
+      queueInteractive(http)
+
+      const error = await login.login({method: 'interactive'}).then(() => {
+        throw new Error('Expected failure')
+      }, error => error as Error)
+
+      expect(error.message).to.equal('Credential storage operation failed')
+      expect(isNetrcPostCommitError(error.cause)).to.equal(true)
+      expect((error.cause as NetrcPostCommitError).operation).to.equal('save')
+      expectSafeErrorSurface(error, [path])
+    })
+
+    it('preserves a marker behind eight ordinary wrappers at the depth boundary', async function () {
+      const path = '/Users/depth-boundary-secret/.netrc'
+      const marker = new NetrcPostCommitError(`marker details at ${path}`, {operation: 'stale-cleanup'})
+      let storageError: Error = marker
+      for (let depth = 7; depth >= 0; depth--) {
+        storageError = new Error(`sensitive wrapper ${depth} at ${path}`, {cause: storageError})
+      }
+
+      const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(storageError)})})
+      queueInteractive(http)
+
+      const error = await login.login({method: 'interactive'}).then(() => {
+        throw new Error('Expected failure')
+      }, error => error as Error)
+
+      let projected: Error = error
+      for (let depth = 0; depth < 8; depth++) {
+        expect(projected.message).to.equal('Credential storage operation failed')
+        expect(projected.cause).to.be.instanceOf(Error)
+        projected = projected.cause as Error
+      }
+
+      expect(isNetrcPostCommitError(projected)).to.equal(true)
+      expect((projected as NetrcPostCommitError).operation).to.equal('stale-cleanup')
+      expectSafeErrorSurface(error, [path])
+    })
+
+    it('bounds a long cause chain after a marker at the depth boundary without leaking paths', async function () {
+      const path = '/Users/long-depth-secret/.netrc'
+      let markerCause: Error = new Error(`deep cause 99 at ${path}`)
+      for (let depth = 98; depth >= 0; depth--) {
+        markerCause = new Error(`deep cause ${depth} at ${path}`, {cause: markerCause})
+      }
+
+      const marker = new NetrcPostCommitError(`marker details at ${path}`, {
+        cause: markerCause,
+        operation: 'remove',
+      })
+      let storageError: Error = marker
+      for (let depth = 7; depth >= 0; depth--) {
+        storageError = new Error(`sensitive wrapper ${depth} at ${path}`, {cause: storageError})
+      }
+
+      const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(storageError)})})
+      queueInteractive(http)
+
+      const error = await login.login({method: 'interactive'}).then(() => {
+        throw new Error('Expected failure')
+      }, error => error as Error)
+
+      let projected: Error = error
+      for (let depth = 0; depth < 8; depth++) projected = projected.cause as Error
+      expect(isNetrcPostCommitError(projected)).to.equal(true)
+      expect((projected as NetrcPostCommitError).operation).to.equal('remove')
+      expect(projected.cause).to.be.instanceOf(Error)
+      expect((projected.cause as Error).message).to.equal('Storage error depth exceeded')
+      expect((projected.cause as Error).cause).to.equal(undefined)
+      expectSafeErrorSurface(error, [path])
+    })
+
+    it('preserves cycles through ordinary Errors while projecting marker-bearing paths', async function () {
+      const first = new Error('first sensitive wrapper')
+      const second = new Error('second sensitive wrapper')
+      const marker = new NetrcPostCommitError('marker details', {operation: 'remove'})
+      const aggregate = new AggregateError([marker], 'aggregate details', {cause: first})
+      Object.defineProperty(first, 'cause', {value: second})
+      Object.defineProperty(second, 'cause', {value: aggregate})
+      const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(first)})})
+      queueInteractive(http)
+
+      const error = await login.login({method: 'interactive'}).then(() => {
+        throw new Error('Expected failure')
+      }, error => error as Error)
+
+      expect(error.message).to.equal('Credential storage operation failed')
+      const projectedSecond = error.cause as Error
+      const projectedAggregate = projectedSecond.cause as AggregateError
+      expect(projectedAggregate).to.be.instanceOf(AggregateError)
+      expect(isNetrcPostCommitError(projectedAggregate.errors[0])).to.equal(true)
+      expect((projectedAggregate.errors[0] as NetrcPostCommitError).operation).to.equal('remove')
+      expect(projectedAggregate.cause).to.equal(error)
+      expectSafeErrorSurface(error, ['first sensitive wrapper', 'second sensitive wrapper'])
+    })
+
+    it('omits a stateful operation value that changes after marker validation', async function () {
+      const account = 'getter-secret@example.com'
+      const token = 'getter-secret-token'
+      const path = '/Users/getter-secret/.netrc'
+      let operationReads = 0
+      const marker = Object.assign(new Error(`committed ${account} ${token}`), {
+        code: 'NETRC_POST_COMMIT_FAILURE',
+        committed: true,
+      })
+      Object.defineProperty(marker, 'operation', {
+        get() {
+          operationReads++
+          return operationReads === 1 ? 'save' : path
+        },
+      })
+      const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(marker)})})
+      queueInteractive(http, account, token)
+
+      const error = await login.login({method: 'interactive'}).catch(error => error as Error)
+
+      expect(isNetrcPostCommitError(error)).to.equal(true)
+      if (!isNetrcPostCommitError(error)) throw new Error('Expected post-commit marker')
+      expect(error.operation).to.equal(undefined)
+      expect(operationReads).to.equal(2)
+      expectSafeErrorSurface(error, [account, token, path])
+    })
+
+    for (const statefulProperty of ['code', 'committed'] as const) {
+      it(`retains a sanitized marker after one stateful ${statefulProperty} read`, async function () {
+        const account = `${statefulProperty}-getter-secret@example.com`
+        const token = `${statefulProperty}-getter-secret-token`
+        const path = `/Users/${statefulProperty}-getter-secret/.netrc`
+        let reads = 0
+        const marker = Object.assign(new Error(`committed ${account} ${token} at ${path}`), {
+          code: 'NETRC_POST_COMMIT_FAILURE',
+          committed: true,
+          operation: 'save',
+        })
+        Object.defineProperty(marker, statefulProperty, {
+          configurable: true,
+          get() {
+            reads++
+            if (reads === 1) return statefulProperty === 'code' ? 'NETRC_POST_COMMIT_FAILURE' : true
+            return path
+          },
+        })
+        const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(marker)})})
+        queueInteractive(http, account, token)
+
+        const error = await login.login({method: 'interactive'}).catch(error => error as Error)
+
+        expect(reads).to.equal(1)
+        expect(isNetrcPostCommitError(error)).to.equal(true)
+        if (!isNetrcPostCommitError(error)) throw new Error('Expected post-commit marker')
+        expect(error.operation).to.equal('save')
+        expect(error.message).to.equal('Netrc mutation committed but a subsequent operation failed')
+        expectSafeErrorSurface(error, [account, token, path])
+      })
+    }
 
     it('treats storage-thrown HTTP errors as storage diagnostics', async function () {
       const account = 'storage-http@example.com'

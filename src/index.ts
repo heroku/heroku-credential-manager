@@ -8,10 +8,143 @@ import {NetrcHandler} from './credential-handlers/netrc-handler.js'
 import {WindowsHandler} from './credential-handlers/windows-handler.js'
 import {CredentialStore, getNativeCredentialStore, getStorageConfig} from './lib/credential-storage-selector.js'
 import {NativeCredentialNotFoundError} from './native-credential-not-found-error.js'
+import {
+  NetrcPostCommitError, type NetrcPostCommitOperation, isNetrcPostCommitError,
+} from './netrc-post-commit-error.js'
 
 const credDebug = debug('heroku-credential-manager')
 
 const SERVICE_NAME = 'heroku-cli'
+
+function errorProperty(error: unknown, property: 'cause' | 'message'): unknown {
+  try {
+    return (error as Record<'cause' | 'message', unknown>)[property]
+  } catch {
+    return undefined
+  }
+}
+
+function aggregateErrors(error: AggregateError): undefined | unknown[] {
+  try {
+    return [...error.errors as Iterable<unknown>]
+  } catch {
+    return undefined
+  }
+}
+
+function collectNetrcPostCommitErrors(
+  error: unknown,
+  markers: Set<object>,
+  linksByError: Map<object, unknown[]>,
+  visited = new Set<object>(),
+): void {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null || visited.has(error)) return
+  visited.add(error)
+
+  if (isNetrcPostCommitError(error)) markers.add(error)
+  const links: unknown[] = []
+  if (error instanceof AggregateError) {
+    links.push(...(aggregateErrors(error) ?? []))
+  }
+
+  if (error instanceof Error || markers.has(error)) links.push(errorProperty(error, 'cause'))
+  linksByError.set(error, links)
+  for (const link of links) {
+    collectNetrcPostCommitErrors(link, markers, linksByError, visited)
+  }
+}
+
+function errorsContainingNetrcPostCommitErrors(
+  markers: Set<object>,
+  linksByError: Map<object, unknown[]>,
+): Set<object> {
+  const markedErrors = new Set(markers)
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const [error, links] of linksByError) {
+      if (markedErrors.has(error)) continue
+      const containsMarker = links.some(link => markedErrors.has(link as object))
+      if (containsMarker) {
+        markedErrors.add(error)
+        changed = true
+      }
+    }
+  }
+
+  return markedErrors
+}
+
+type ContextualizationContext = {
+  markedErrors: Set<object>
+  markers: Set<object>
+  operation: NetrcPostCommitOperation
+  projected: Map<object, unknown>
+}
+
+function contextualizedNetrcError(
+  error: unknown,
+  context: ContextualizationContext,
+): unknown {
+  const {markedErrors, markers, operation, projected} = context
+  if ((typeof error === 'object' || typeof error === 'function') && error !== null && projected.has(error)) {
+    return projected.get(error)
+  }
+
+  if (markers.has(error as object)) {
+    const message = errorProperty(error, 'message')
+    const contextualized = new NetrcPostCommitError(
+      typeof message === 'string' ? message : 'Netrc mutation committed but a subsequent operation failed',
+      {operation},
+    )
+    projected.set(error as object, contextualized)
+    Object.defineProperty(contextualized, 'cause', {
+      configurable: true,
+      value: contextualizedNetrcError(errorProperty(error, 'cause'), context),
+      writable: true,
+    })
+    return contextualized
+  }
+
+  if (!markedErrors.has(error as object)) return error
+
+  if (!(error instanceof AggregateError)) {
+    const message = errorProperty(error, 'message')
+    const contextualized = new Error(typeof message === 'string' ? message : 'Netrc operation failed')
+    projected.set(error as object, contextualized)
+    Object.defineProperty(contextualized, 'cause', {
+      configurable: true,
+      value: contextualizedNetrcError(errorProperty(error, 'cause'), context),
+      writable: true,
+    })
+    return contextualized
+  }
+
+  const message = errorProperty(error, 'message')
+  const contextualized = new AggregateError([], typeof message === 'string' ? message : 'Netrc operation failed')
+  projected.set(error, contextualized)
+  contextualized.errors = (aggregateErrors(error) ?? [])
+    .map(child => contextualizedNetrcError(child, context))
+  Object.defineProperty(contextualized, 'cause', {
+    configurable: true,
+    value: contextualizedNetrcError(errorProperty(error, 'cause'), context),
+    writable: true,
+  })
+  return contextualized
+}
+
+function contextualizeNetrcPostCommitError(error: unknown, operation: NetrcPostCommitOperation): unknown {
+  const markers = new Set<object>()
+  const linksByError = new Map<object, unknown[]>()
+  collectNetrcPostCommitErrors(error, markers, linksByError)
+  if (markers.size === 0) return error
+  return contextualizedNetrcError(error, {
+    markedErrors: errorsContainingNetrcPostCommitErrors(markers, linksByError),
+    markers,
+    operation,
+    projected: new Map<object, unknown>(),
+  })
+}
 
 /**
  * Saves authentication credentials to the native credential store (if available) or .netrc file.
@@ -43,9 +176,17 @@ export async function saveAuth(account: string, token: string, hosts: string[], 
       login: account,
       password: token,
     }
-    await netrcHandler.saveAuthForHosts(netrcAuth, hosts)
+    try {
+      await netrcHandler.saveAuthForHosts(netrcAuth, hosts)
+    } catch (error) {
+      throw contextualizeNetrcPostCommitError(error, 'save')
+    }
   } else if (hosts.length > 0) {
-    await netrcHandler.removeAuthForHosts(hosts, account)
+    try {
+      await netrcHandler.removeAuthForHosts(hosts, account)
+    } catch (error) {
+      throw contextualizeNetrcPostCommitError(error, 'stale-cleanup')
+    }
   }
 }
 
@@ -152,7 +293,7 @@ export async function removeAuth(
       await netrcHandler.removeAuthForHosts(hosts, account, expectedToken)
     } catch (error) {
       netrcFailed = true
-      netrcError = error
+      netrcError = contextualizeNetrcPostCommitError(error, 'remove')
     }
   }
 
@@ -205,4 +346,5 @@ export type {
 } from './lib/netrc-parser.js'
 export type {AuthEntry, KeychainAuthEntry, NetrcAuthEntry} from './lib/types.js'
 export {NativeCredentialNotFoundError} from './native-credential-not-found-error.js'
-export {NetrcPostCommitError} from './netrc-post-commit-error.js'
+export {NetrcPostCommitError, isNetrcPostCommitError} from './netrc-post-commit-error.js'
+export type {NetrcPostCommitOperation} from './netrc-post-commit-error.js'

@@ -162,6 +162,137 @@ describe('credential-manager', function () {
       expect(netrcStub.calledOnce).to.be.true
     })
 
+    for (const mode of ['fallback', 'forced'] as const) {
+      it(`adds save context to ${mode} netrc post-commit failures`, async function () {
+        if (mode === 'forced') process.env.HEROKU_NETRC_WRITE = 'TRUE'
+        else sinon.stub(MacOSHandler.prototype, 'saveAuth').throws(new Error('Keychain error'))
+        const cause = new Error('release failed')
+        sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').rejects(
+          new credentialManager.NetrcPostCommitError('Committed save failed afterward', {cause}),
+        )
+
+        const error = await credentialManager.saveAuth(
+          'user@example.com', 'test-token', ['api.heroku.com'],
+        ).catch(error => error as Error)
+
+        expect(credentialManager.isNetrcPostCommitError(error)).to.equal(true)
+        if (credentialManager.isNetrcPostCommitError(error)) {
+          expect(error.operation).to.equal('save')
+          expect(error.cause).to.equal(cause)
+        }
+      })
+    }
+
+    it('preserves ordinary fallback errors by identity', async function () {
+      sinon.stub(MacOSHandler.prototype, 'saveAuth').throws(new Error('Keychain error'))
+      const netrcError = new Error('ordinary netrc failure')
+      sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').rejects(netrcError)
+
+      const error = await credentialManager.saveAuth(
+        'user@example.com', 'test-token', ['api.heroku.com'],
+      ).catch(error => error as Error)
+
+      expect(error).to.equal(netrcError)
+    })
+
+    it('preserves a cyclic ordinary aggregate by identity without overflowing', async function () {
+      sinon.stub(MacOSHandler.prototype, 'saveAuth').throws(new Error('Keychain error'))
+      const aggregate = new AggregateError([], 'ordinary aggregate')
+      aggregate.errors.push(aggregate)
+      Object.defineProperty(aggregate, 'cause', {value: aggregate})
+      sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').rejects(aggregate)
+
+      const error = await credentialManager.saveAuth(
+        'user@example.com', 'test-token', ['api.heroku.com'],
+      ).then(() => {
+        throw new Error('Expected save failure')
+      }, error => error as AggregateError)
+
+      expect(error).to.equal(aggregate)
+    })
+
+    it('contextualizes markers reachable through aggregate cause', async function () {
+      sinon.stub(MacOSHandler.prototype, 'saveAuth').throws(new Error('Keychain error'))
+      const marker = new credentialManager.NetrcPostCommitError('Committed save failed afterward')
+      const aggregate = new AggregateError([new Error('ordinary child')], 'Netrc failures', {cause: marker})
+      sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').rejects(aggregate)
+
+      const error = await credentialManager.saveAuth(
+        'user@example.com', 'test-token', ['api.heroku.com'],
+      ).then(() => {
+        throw new Error('Expected save failure')
+      }, error => error as AggregateError)
+
+      expect(error).to.not.equal(aggregate)
+      expect((error.errors[0] as Error).message).to.equal('ordinary child')
+      expect(credentialManager.isNetrcPostCommitError(error.cause)).to.equal(true)
+      expect((error.cause as credentialManager.NetrcPostCommitError).operation).to.equal('save')
+    })
+
+    it('preserves a marker alias shared by aggregate cause and child', async function () {
+      sinon.stub(MacOSHandler.prototype, 'saveAuth').throws(new Error('Keychain error'))
+      const marker = new credentialManager.NetrcPostCommitError('Committed save failed afterward')
+      const aggregate = new AggregateError([marker], 'Netrc failures', {cause: marker})
+      sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').rejects(aggregate)
+
+      const error = await credentialManager.saveAuth(
+        'user@example.com', 'test-token', ['api.heroku.com'],
+      ).then(() => {
+        throw new Error('Expected save failure')
+      }, error => error as AggregateError)
+
+      expect(error.errors[0]).to.equal(error.cause)
+      expect(credentialManager.isNetrcPostCommitError(error.errors[0])).to.equal(true)
+      expect((error.errors[0] as credentialManager.NetrcPostCommitError).operation).to.equal('save')
+    })
+
+    it('contextualizes markers inside cyclic aggregates without overflowing', async function () {
+      sinon.stub(MacOSHandler.prototype, 'saveAuth').throws(new Error('Keychain error'))
+      const marker = new credentialManager.NetrcPostCommitError('Committed save failed afterward')
+      const aggregate = new AggregateError([marker], 'cyclic netrc aggregate')
+      aggregate.errors.push(aggregate)
+      Object.defineProperty(aggregate, 'cause', {value: aggregate})
+      sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').rejects(aggregate)
+
+      const error = await credentialManager.saveAuth(
+        'user@example.com', 'test-token', ['api.heroku.com'],
+      ).then(() => {
+        throw new Error('Expected save failure')
+      }, error => error as AggregateError)
+
+      expect(error).to.not.equal(aggregate)
+      expect((error.errors[0] as credentialManager.NetrcPostCommitError).operation).to.equal('save')
+      expect(error.errors[1]).to.equal(error)
+      expect(error.cause).to.equal(error)
+    })
+
+    it('contextualizes a root save marker after one structural validation read', async function () {
+      sinon.stub(MacOSHandler.prototype, 'saveAuth').throws(new Error('Keychain error'))
+      const sensitivePath = '/Users/stateful-save/.netrc'
+      let operationReads = 0
+      const marker = Object.assign(new Error('Committed save failed afterward'), {
+        code: 'NETRC_POST_COMMIT_FAILURE',
+        committed: true,
+      })
+      Object.defineProperty(marker, 'operation', {
+        get() {
+          operationReads++
+          return operationReads === 1 ? 'save' : sensitivePath
+        },
+      })
+      sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').rejects(marker)
+
+      const error = await credentialManager.saveAuth(
+        'user@example.com', 'test-token', ['api.heroku.com'],
+      ).catch(error => error as Error)
+
+      expect(credentialManager.isNetrcPostCommitError(error)).to.equal(true)
+      if (!credentialManager.isNetrcPostCommitError(error)) throw new Error('Expected post-commit marker')
+      expect(error.operation).to.equal('save')
+      expect(operationReads).to.equal(1)
+      expect(`${String(error)}\n${JSON.stringify(error)}\n${error.operation}`).to.not.include(sensitivePath)
+    })
+
     it('should save to credential store with custom service name', async function () {
       const macosStub = sinon.stub(MacOSHandler.prototype, 'saveAuth')
       const netrcStub = sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').resolves()
@@ -186,6 +317,24 @@ describe('credential-manager', function () {
         .to.be.rejectedWith(Error, 'Netrc cleanup error')
       expect(macosStub.calledOnce).to.be.true
       expect(netrcStub.notCalled).to.be.true
+    })
+
+    it('adds stale-cleanup context after a successful native save', async function () {
+      sinon.stub(MacOSHandler.prototype, 'saveAuth')
+      const cause = new Error('release failed')
+      sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').rejects(
+        new credentialManager.NetrcPostCommitError('Committed cleanup failed afterward', {cause}),
+      )
+
+      const error = await credentialManager.saveAuth(
+        'user@example.com', 'test-token', ['api.heroku.com'],
+      ).catch(error => error as Error)
+
+      expect(credentialManager.isNetrcPostCommitError(error)).to.equal(true)
+      if (credentialManager.isNetrcPostCommitError(error)) {
+        expect(error.operation).to.equal('stale-cleanup')
+        expect(error.cause).to.equal(cause)
+      }
     })
   })
 
@@ -380,6 +529,56 @@ describe('credential-manager', function () {
       expect(error).to.be.instanceOf(AggregateError)
       expect(error.message).to.equal('Failed to remove credentials from native storage and netrc')
       expect(error.errors).to.deep.equal([nativeError, netrcError])
+    })
+
+    it('adds remove context while preserving marker position in aggregate failures', async function () {
+      const nativeError = new Error('Keychain error')
+      const releaseError = new Error('release failed')
+      sinon.stub(MacOSHandler.prototype, 'removeAuth').throws(nativeError)
+      sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').rejects(new AggregateError([
+        new Error('ordinary netrc failure'),
+        new credentialManager.NetrcPostCommitError('Committed removal failed afterward', {cause: releaseError}),
+      ], 'Netrc failures'))
+
+      const error = await credentialManager.removeAuth('user@example.com', ['api.heroku.com']).then(() => {
+        throw new Error('Expected removal failure')
+      }, error => error as AggregateError)
+
+      expect(error).to.be.instanceOf(AggregateError)
+      expect(error.errors[0]).to.equal(nativeError)
+      const netrcAggregate = error.errors[1] as AggregateError
+      expect(netrcAggregate).to.be.instanceOf(AggregateError)
+      expect((netrcAggregate.errors[0] as Error).message).to.equal('ordinary netrc failure')
+      expect(credentialManager.isNetrcPostCommitError(netrcAggregate.errors[1])).to.equal(true)
+      const postCommitError = netrcAggregate.errors[1] as credentialManager.NetrcPostCommitError
+      expect(postCommitError.operation).to.equal('remove')
+      expect(postCommitError.cause).to.equal(releaseError)
+    })
+
+    it('contextualizes a root remove marker after one structural validation read', async function () {
+      const sensitivePath = '/Users/stateful-remove/.netrc'
+      let operationReads = 0
+      const marker = Object.assign(new Error('Committed removal failed afterward'), {
+        code: 'NETRC_POST_COMMIT_FAILURE',
+        committed: true,
+      })
+      Object.defineProperty(marker, 'operation', {
+        get() {
+          operationReads++
+          return operationReads === 1 ? 'save' : sensitivePath
+        },
+      })
+      sinon.stub(NetrcHandler.prototype, 'removeAuthForHosts').rejects(marker)
+
+      const error = await credentialManager.removeAuth(
+        'user@example.com', ['api.heroku.com'],
+      ).catch(error => error as Error)
+
+      expect(credentialManager.isNetrcPostCommitError(error)).to.equal(true)
+      if (!credentialManager.isNetrcPostCommitError(error)) throw new Error('Expected post-commit marker')
+      expect(error.operation).to.equal('remove')
+      expect(operationReads).to.equal(1)
+      expect(`${String(error)}\n${JSON.stringify(error)}\n${error.operation}`).to.not.include(sensitivePath)
     })
 
     it('treats a missing native credential as a no-op and still cleans netrc', async function () {

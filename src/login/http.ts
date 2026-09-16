@@ -2,6 +2,13 @@ import {createRequire} from 'node:module'
 
 import type {LoginHttp, LoginHttpRequest, LoginHttpResponse} from './types.js'
 
+import {
+  NetrcPostCommitError,
+  type NetrcPostCommitOperation,
+  isNetrcPostCommitError,
+  isNetrcPostCommitOperation,
+} from '../netrc-post-commit-error.js'
+
 const require = createRequire(import.meta.url)
 const packageMetadata = require('../../package.json') as {name: string, version: string}
 const USER_AGENT = `${packageMetadata.name}/${packageMetadata.version} node-${process.version}`
@@ -24,8 +31,17 @@ type ProjectionContext = {
   seen: Set<Error>
 }
 
+type StorageProjectionContext = {
+  depth: number
+  postCommitBearingErrors: Set<object>
+  postCommitErrors: Set<object>
+  projected: Map<object, Error>
+}
+
 const MAX_CAUSE_DEPTH = 8
 const SCRUBBED = '[SCRUBBED]'
+const SAFE_STORAGE_ERROR = 'Credential storage operation failed'
+const SAFE_NETRC_POST_COMMIT_ERROR = 'Netrc mutation committed but a subsequent operation failed'
 
 export type LoginHttpErrorBody = {
   id?: string
@@ -179,19 +195,147 @@ function safeErrorProjection(
   return projected
 }
 
+function aggregateErrors(error: AggregateError): undefined | unknown[] {
+  try {
+    return [...error.errors as Iterable<unknown>]
+  } catch {
+    return undefined
+  }
+}
+
+function collectNetrcPostCommitErrors(
+  error: unknown,
+  postCommitErrors: Set<object>,
+  linksByError: Map<object, unknown[]>,
+  seen = new Set<object>(),
+): void {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null || seen.has(error)) return
+  seen.add(error)
+
+  if (isNetrcPostCommitError(error)) {
+    postCommitErrors.add(error)
+  }
+
+  const links: unknown[] = []
+  if (error instanceof AggregateError) links.push(...(aggregateErrors(error) ?? []))
+  if (error instanceof Error || postCommitErrors.has(error)) links.push(errorCause(error as Error))
+  linksByError.set(error, links)
+  for (const link of links) {
+    collectNetrcPostCommitErrors(link, postCommitErrors, linksByError, seen)
+  }
+}
+
+function errorsContainingNetrcPostCommitErrors(
+  postCommitErrors: Set<object>,
+  linksByError: Map<object, unknown[]>,
+): Set<object> {
+  const bearingErrors = new Set(postCommitErrors)
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const [error, links] of linksByError) {
+      if (bearingErrors.has(error)) continue
+      if (links.some(link => bearingErrors.has(link as object))) {
+        bearingErrors.add(error)
+        changed = true
+      }
+    }
+  }
+
+  return bearingErrors
+}
+
+function safeNetrcPostCommitOperation(error: unknown): NetrcPostCommitOperation | undefined {
+  try {
+    const {operation} = error as {operation?: unknown}
+    return isNetrcPostCommitOperation(operation) ? operation : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function safeStorageCause(
+  cause: unknown,
+  context: StorageProjectionContext,
+): Error | string | undefined {
+  if (typeof cause === 'string') return SAFE_STORAGE_ERROR
+  if (!(cause instanceof Error) && !context.postCommitBearingErrors.has(cause as object)) return
+  return safeStorageErrorProjection(cause as Error | NetrcPostCommitError, context)
+}
+
+function safeStorageErrorProjection(
+  error: Error | NetrcPostCommitError,
+  context: StorageProjectionContext,
+): Error {
+  const existing = context.projected.get(error)
+  if (existing) return existing
+
+  if (context.postCommitErrors.has(error)) {
+    const projected = new NetrcPostCommitError(SAFE_NETRC_POST_COMMIT_ERROR, {
+      operation: safeNetrcPostCommitOperation(error),
+    })
+    context.projected.set(error, projected)
+    Object.defineProperty(projected, 'cause', {
+      configurable: true,
+      value: safeStorageCause(errorCause(error), {...context, depth: context.depth + 1}),
+      writable: true,
+    })
+    return projected
+  }
+
+  if (context.depth >= MAX_CAUSE_DEPTH) return new Error('Storage error depth exceeded')
+
+  if (error instanceof AggregateError && context.postCommitBearingErrors.has(error)) {
+    const projected = new AggregateError([], SAFE_STORAGE_ERROR)
+    context.projected.set(error, projected)
+    const errors = aggregateErrors(error) ?? []
+    projected.errors = errors.map(child => child instanceof Error || context.postCommitErrors.has(child as object)
+      ? safeStorageErrorProjection(child as Error | NetrcPostCommitError, {...context, depth: context.depth + 1})
+      : new Error(SAFE_STORAGE_ERROR))
+    Object.defineProperty(projected, 'cause', {
+      configurable: true,
+      value: safeStorageCause(errorCause(error), {...context, depth: context.depth + 1}),
+      writable: true,
+    })
+    return projected
+  }
+
+  const projected = new Error(SAFE_STORAGE_ERROR)
+  context.projected.set(error, projected)
+  Object.defineProperty(projected, 'cause', {
+    configurable: true,
+    value: safeStorageCause(errorCause(error), {...context, depth: context.depth + 1}),
+    writable: true,
+  })
+  return projected
+}
+
 export function sanitizePublicError(
   error: unknown,
   sensitiveValues: readonly string[] = [],
   options: SanitizationOptions = {},
 ): Error {
   try {
+    const postCommitErrors = new Set<object>()
+    const linksByError = new Map<object, unknown[]>()
+    collectNetrcPostCommitErrors(error, postCommitErrors, linksByError)
+    if (postCommitErrors.size > 0) {
+      return safeStorageErrorProjection(error as Error, {
+        depth: 0,
+        postCommitBearingErrors: errorsContainingNetrcPostCommitErrors(postCommitErrors, linksByError),
+        postCommitErrors,
+        projected: new Map<object, Error>(),
+      })
+    }
+
     if (!(error instanceof Error)) return new Error('Login request failed')
     const normalized = options.normalizeHttpError ? normalizeLoginHttpError(error) : error
     if (normalized instanceof LoginHttpError && (options.preserveHttpDetails ?? true)) {
       return new LoginHttpError(normalized.status, normalized.body, undefined, sensitiveValues)
     }
 
-    return safeErrorProjection(normalized, sensitiveVariants(sensitiveValues), {
+    const variants = sensitiveVariants(sensitiveValues)
+    return safeErrorProjection(normalized, variants, {
       depth: 0,
       preserveCause: options.preserveCause ?? true,
       seen: new Set<Error>(),

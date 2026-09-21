@@ -152,17 +152,17 @@ export async function removeAuth(
  */
 export function getCredentialHandler(store: CredentialStore) {
   switch (store) {
-  case CredentialStore.LinuxSecretService: {
-    return new LinuxHandler()
-  }
+    case CredentialStore.LinuxSecretService: {
+      return new LinuxHandler()
+    }
 
-  case CredentialStore.MacOSKeychain: {
-    return new MacOSHandler()
-  }
+    case CredentialStore.MacOSKeychain: {
+      return new MacOSHandler()
+    }
 
-  case CredentialStore.WindowsCredentialManager: {
-    return new WindowsHandler()
-  }
+    case CredentialStore.WindowsCredentialManager: {
+      return new WindowsHandler()
+    }
   }
 }
 
@@ -175,9 +175,9 @@ export type {StorageConfig} from './lib/credential-storage-selector.js'
 export {deleteLoginState, readLoginState, writeLoginState} from './lib/login-state.js'
 export {Netrc, parse} from './lib/netrc-parser.js'
 export type {
-  MachineToken,
   Machines,
   MachinesWithTokens,
+  MachineToken,
   Token,
 } from './lib/netrc-parser.js'
 export type {AuthEntry, KeychainAuthEntry, NetrcAuthEntry} from './lib/types.js'

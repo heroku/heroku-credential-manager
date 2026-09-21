@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 
 import {
-  type FakeCredentialStoreSetup,
   assertNativeAcceptanceEnvironment,
   assertNetrcPathIsIsolated,
   createAcceptanceFixtures,
+  type FakeCredentialStoreSetup,
   setupFakeCredentialStore,
 } from '../helpers/acceptance-utils.js'
 

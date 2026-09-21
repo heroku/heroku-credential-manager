@@ -1,7 +1,7 @@
 import type {LoginPrompt} from './types.js'
 
 import {LoginHttpError} from './http.js'
-import {type RequestContext, createOAuthToken} from './oauth.js'
+import {createOAuthToken, type RequestContext} from './oauth.js'
 
 type InteractiveOptions = {
   apiUrl: string

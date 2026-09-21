@@ -49,8 +49,8 @@ export interface LoginHttp {
 }
 
 /** Result from the login-method prompt. */
-export type LoginPromptSelection =
-  | {cancelled: 'interrupt' | 'quit'}
+export type LoginPromptSelection
+  = | {cancelled: 'interrupt' | 'quit'}
   | {method: 'browser'}
 
 /** Semantic prompts required by interactive login flows. */
@@ -122,7 +122,7 @@ export interface LoginStorage {
    */
   hasNativeStorage(): boolean
   /** Reads the account-selection state associated with native credential storage. */
-  readLoginState(dataDir: string): Promise<{account: string} | undefined>
+  readLoginState(dataDir: string): Promise<undefined | {account: string}>
   /**
    * Attempts to remove credentials for the account and hosts in the optional native service namespace.
    * `expectedToken` is a best-effort snapshot safeguard: implementations should compare it when supported before

@@ -14,17 +14,17 @@ function homeEnvironment(home) {
   if (process.platform === 'win32') {
     return {
       HOME: home,
-      USERPROFILE: home,
       HOMEDRIVE: root.slice(0, 2),
       HOMEPATH: home.slice(2) || path.sep,
+      USERPROFILE: home,
     }
   }
 
   return {
     HOME: home,
-    USERPROFILE: home,
     HOMEDRIVE: root,
     HOMEPATH: home.slice(root.length),
+    USERPROFILE: home,
   }
 }
 
@@ -33,10 +33,12 @@ try {
 
   const arguments_ = process.argv.slice(2)
   const pattern = process.env.npm_config_file || 'test/**/*.test.ts'
-  const ignoredPatterns = process.env.npm_config_file ? [] : [
-    '--ignore',
-    'test/acceptance/**',
-  ]
+  const ignoredPatterns = process.env.npm_config_file
+    ? []
+    : [
+      '--ignore',
+      'test/acceptance/**',
+    ]
   const loader = pathToFileURL(path.join(packageRoot, 'node_modules', 'ts-node', 'esm.mjs')).href
   const nodeOptions = process.versions.node.split('.').map(Number)[0] >= 22
     ? [process.env.NODE_OPTIONS, '--no-experimental-require-module'].filter(Boolean).join(' ')

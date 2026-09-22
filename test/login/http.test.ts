@@ -5,7 +5,7 @@ import sinon from 'sinon'
 import type {LoginHttp} from '../../src/login/index.js'
 
 import {
-  FetchLoginHttp, LoginHttpError, checkedRequest, normalizeLoginHttpError,
+  checkedRequest, FetchLoginHttp, LoginHttpError, normalizeLoginHttpError,
 } from '../../src/login/http.js'
 
 const require = createRequire(import.meta.url)

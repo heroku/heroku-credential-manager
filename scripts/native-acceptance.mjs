@@ -14,13 +14,13 @@ const parsedRoot = path.parse(tempRoot).root
 const environment = {
   ...process.env,
   CI: 'true',
-  NATIVE_CREDENTIAL_ACCEPTANCE: 'true',
   CREDENTIAL_ACCEPTANCE_TEMP_ROOT: tempRoot,
+  NATIVE_CREDENTIAL_ACCEPTANCE: 'true',
   ...(process.platform === 'darwin' ? {CFFIXED_USER_HOME: tempRoot} : {}),
   HOME: tempRoot,
-  USERPROFILE: tempRoot,
   HOMEDRIVE: process.platform === 'win32' ? parsedRoot.replace(/[/\\]$/, '') : parsedRoot,
   HOMEPATH: tempRoot.slice(process.platform === 'win32' ? parsedRoot.length - 1 : parsedRoot.length) || path.sep,
+  USERPROFILE: tempRoot,
 }
 
 const mocha = path.join(repositoryRoot, 'node_modules', 'mocha', 'bin', 'mocha.js')

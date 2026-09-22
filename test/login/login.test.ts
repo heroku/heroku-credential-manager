@@ -67,7 +67,7 @@ function storage(overrides: Partial<LoginStorage> = {}): LoginStorage {
     getAuth: async account => ({account: account ?? 'stored@example.com', token: 'stored-token'}),
     hasNativeStorage: () => false,
     async readLoginState() {
-      return {} as {account: string} | undefined
+      return {} as undefined | {account: string}
     },
     async removeAuth() {},
     async saveAuth() {},
@@ -76,7 +76,7 @@ function storage(overrides: Partial<LoginStorage> = {}): LoginStorage {
   }
 }
 
-function output(): {messages: string[], warnings: string[]} & LoginOutput {
+function output(): LoginOutput & {messages: string[], warnings: string[]} {
   const messages: string[] = []
   const warnings: string[] = []
   return {
@@ -84,7 +84,7 @@ function output(): {messages: string[], warnings: string[]} & LoginOutput {
   }
 }
 
-function progress(): {starts: string[], stops: number} & LoginProgress {
+function progress(): LoginProgress & {starts: string[], stops: number} {
   const result = {
     start(message: string) {
       result.starts.push(message)
@@ -98,14 +98,14 @@ function progress(): {starts: string[], stops: number} & LoginProgress {
   return result
 }
 
-function fakeTimers(): {cleared: number, fire(): void, pending: number} & LoginTimers {
+function fakeTimers(): LoginTimers & {cleared: number, fire(): void, pending: number} {
   const handlers = new Map<unknown, TimerHandler>()
   const result = {
+    cleared: 0,
     clearTimeout(timer: unknown) {
       result.cleared++
       handlers.delete(timer)
     },
-    cleared: 0,
     fire() {
       const next = handlers.entries().next().value as [unknown, TimerHandler] | undefined
       if (!next) return
@@ -768,7 +768,7 @@ describe('Login', function () {
     })
 
     it('rejects unsafe browser and CLI paths before opening or polling without exposing tokens', async function () {
-      const unsafePaths = ['https://attacker.test/path', '//attacker.test/path', '/\\attacker.test/path', '/@attacker.test/path']
+      const unsafePaths = ['https://attacker.test/path', '//attacker.test/path', String.raw`/\attacker.test/path`, '/@attacker.test/path']
       for (const field of ['browser_url', 'cli_url'] as const) {
         for (const unsafePath of unsafePaths) {
           const open = sinon.stub().resolves()

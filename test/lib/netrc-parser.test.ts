@@ -1,5 +1,5 @@
 import {expect} from 'chai'
-import {ExecaError, execa} from 'execa'
+import {execa, ExecaError} from 'execa'
 import fs from 'fs-extra'
 import os from 'node:os'
 import path from 'node:path'
@@ -148,7 +148,8 @@ machine ray login demo password mypassword
       f,
       `machine api.dickeyxxx.com # foo
   login jeff@foo.com
-  password myapikey`)
+  password myapikey`,
+    )
     const netrc = new Netrc(f)
     netrc.loadSync()
 
@@ -206,7 +207,6 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
 =PGaL
 -----END PGP MESSAGE-----`
 
-  // eslint-disable-next-line mocha/no-setup-in-describe
   skipOnWindows('synchronously decrypts gpg-encrypted netrc file', async function () {
     await configureGpgMock().catch(error => {
       if (error instanceof ExecaError && error.code === 'ENOENT') {
@@ -229,7 +229,6 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
     expect(permissionBits(fs.statSync(f).mode)).to.equal(0o600)
   })
 
-  // eslint-disable-next-line mocha/no-setup-in-describe
   skipOnWindows('asynchronously decrypts gpg-encrypted netrc file', async function () {
     await configureGpgMock().catch(error => {
       if (error instanceof ExecaError && error.code === 'ENOENT') {
@@ -252,7 +251,6 @@ pQgBLBordnqQajWt1ao+8AZiAsOooF0wJqm/mH1Og5/ADuhvZEQ=
     expect(permissionBits(fs.statSync(f).mode)).to.equal(0o600)
   })
 
-  // eslint-disable-next-line mocha/no-setup-in-describe
   skipOnWindows('synchronously tightens existing file permissions and preserves formatting', function () {
     const f = 'tmp/netrc'
     const contents = `# credentials
@@ -271,7 +269,6 @@ machine api.heroku.com
     expect(permissionBits(fs.statSync(f).mode)).to.equal(0o600)
   })
 
-  // eslint-disable-next-line mocha/no-setup-in-describe
   skipOnWindows('asynchronously tightens existing file permissions and preserves formatting', async function () {
     const f = 'tmp/netrc'
     const contents = `# credentials
@@ -290,7 +287,6 @@ machine api.heroku.com
     expect(permissionBits(fs.statSync(f).mode)).to.equal(0o600)
   })
 
-  // eslint-disable-next-line mocha/no-setup-in-describe
   skipOnWindows('creates new files with restricted permissions for sync and async saves', async function () {
     const syncFile = 'tmp/netrc-sync'
     const asyncFile = 'tmp/netrc-async'
@@ -308,7 +304,6 @@ machine api.heroku.com
     expect(permissionBits(fs.statSync(asyncFile).mode)).to.equal(0o600)
   })
 
-  // eslint-disable-next-line mocha/no-setup-in-describe
   skipOnWindows('synchronously refuses a symlink target without modifying its destination', function () {
     const target = 'tmp/netrc-target'
     const f = 'tmp/netrc'
@@ -325,7 +320,6 @@ machine api.heroku.com
     expect(fs.lstatSync(f).isSymbolicLink()).to.equal(true)
   })
 
-  // eslint-disable-next-line mocha/no-setup-in-describe
   skipOnWindows('asynchronously refuses a symlink target without modifying its destination', async function () {
     const target = 'tmp/netrc-target'
     const f = 'tmp/netrc'
@@ -348,7 +342,6 @@ machine api.heroku.com
     expect(fs.lstatSync(f).isSymbolicLink()).to.equal(true)
   })
 
-  // eslint-disable-next-line mocha/no-setup-in-describe
   skipOnWindows('refuses encrypted symlink targets without modifying the destination', async function () {
     await configureGpgMock().catch(error => {
       if (error instanceof ExecaError && error.code === 'ENOENT') {

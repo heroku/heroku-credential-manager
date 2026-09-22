@@ -16,11 +16,11 @@ import type {
 
 import {browserLogin} from './browser.js'
 import {
-  FetchLoginHttp, LoginHttpError, checkedRequest, normalizeLoginHttpError, sanitizePublicError,
+  checkedRequest, FetchLoginHttp, LoginHttpError, normalizeLoginHttpError, sanitizePublicError,
 } from './http.js'
 import {interactiveLogin} from './interactive.js'
 import {
-  type RequestContext, THIRTY_DAYS, bearerHeaders, requestOptions,
+  bearerHeaders, type RequestContext, requestOptions, THIRTY_DAYS,
 } from './oauth.js'
 import {ssoLogin} from './sso.js'
 import {defaultLoginStorage} from './storage.js'
@@ -211,22 +211,18 @@ function expected(error: unknown, resource?: 'authorization' | 'session'): boole
 
 function defaultRedactedTokenMatches(localToken: string, apiToken: string): boolean {
   const match = /^([^*]+)\*{10}([^*]+)$/.exec(apiToken)
-  return Boolean(
-    match
+  return Boolean(match
     && localToken.length >= match[1].length + REDACTED_TOKEN_ASTERISKS.length + match[2].length
     && localToken.startsWith(match[1])
-    && localToken.endsWith(match[2]),
-  )
+    && localToken.endsWith(match[2]))
 }
 
 function listedRedactedTokenMatches(localToken: string, apiToken: string): boolean {
   const match = /^([^*]+)\*{10}([^*]*)$/.exec(apiToken)
-  return Boolean(
-    match
+  return Boolean(match
     && localToken.length >= match[1].length + REDACTED_TOKEN_ASTERISKS.length + match[2].length
     && localToken.startsWith(match[1])
-    && (!match[2] || localToken.endsWith(match[2])),
-  )
+    && (!match[2] || localToken.endsWith(match[2])))
 }
 
 function hasAsterisks(value: string): boolean {
@@ -541,40 +537,40 @@ export class Login {
   private async performLogin(method: LoginMethod, options: LoginOptions, signal: AbortSignal): Promise<AuthEntry> {
     const context: RequestContext = {http: this.http, requestTimeoutMs: this.config.requestTimeoutMs, signal}
     switch (method) {
-    case 'browser': {
-      return browserLogin(context, {
-        apiUrl: this.config.apiUrl,
-        browser: this.browser,
-        browserName: options.browser,
-        environment: this.environment,
-        hostname: this.config.hostname,
-        loginHost: this.config.loginHost,
-        output: this.output,
-        progress: this.progress,
-      })
-    }
+      case 'browser': {
+        return browserLogin(context, {
+          apiUrl: this.config.apiUrl,
+          browser: this.browser,
+          browserName: options.browser,
+          environment: this.environment,
+          hostname: this.config.hostname,
+          loginHost: this.config.loginHost,
+          output: this.output,
+          progress: this.progress,
+        })
+      }
 
-    case 'interactive': {
-      return interactiveLogin(context, {
-        apiUrl: this.config.apiUrl,
-        expiresIn: options.expiresIn,
-        hostname: this.config.hostname,
-        previousAccount: await this.previousAccount(),
-        prompt: this.prompt,
-      })
-    }
+      case 'interactive': {
+        return interactiveLogin(context, {
+          apiUrl: this.config.apiUrl,
+          expiresIn: options.expiresIn,
+          hostname: this.config.hostname,
+          previousAccount: await this.previousAccount(),
+          prompt: this.prompt,
+        })
+      }
 
-    case 'sso': {
-      return ssoLogin(context, {
-        apiUrl: this.config.apiUrl,
-        browser: this.browser,
-        defaultOrganization: this.environment.get('HEROKU_ORGANIZATION'),
-        output: this.output,
-        progress: this.progress,
-        prompt: this.prompt,
-        ssoUrl: this.config.ssoUrl,
-      })
-    }
+      case 'sso': {
+        return ssoLogin(context, {
+          apiUrl: this.config.apiUrl,
+          browser: this.browser,
+          defaultOrganization: this.environment.get('HEROKU_ORGANIZATION'),
+          output: this.output,
+          progress: this.progress,
+          prompt: this.prompt,
+          ssoUrl: this.config.ssoUrl,
+        })
+      }
     }
   }
 

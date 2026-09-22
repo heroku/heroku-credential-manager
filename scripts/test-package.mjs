@@ -13,17 +13,17 @@ const consumerDirectory = path.join(temporaryRoot, 'consumer')
 const loginTypesDirectory = path.join(temporaryRoot, 'login-types-consumer')
 const isolatedHome = path.join(temporaryRoot, 'home')
 const forbiddenDependencies = new Set([
-  'inquirer',
-  'open',
   '@heroku-cli/command',
   '@heroku/heroku-cli-util',
-  '@oclif/core',
-  '@heroku/http-call',
   '@heroku/heroku-fetch',
-  'node-fetch',
+  '@heroku/http-call',
   '@heroku/sdk',
   '@heroku/types',
+  '@oclif/core',
+  'inquirer',
   'ky',
+  'node-fetch',
+  'open',
   'undici',
 ])
 
@@ -52,17 +52,17 @@ function homeEnvironment(home) {
   if (process.platform === 'win32') {
     return {
       HOME: home,
-      USERPROFILE: home,
       HOMEDRIVE: root.slice(0, 2),
       HOMEPATH: home.slice(2) || path.sep,
+      USERPROFILE: home,
     }
   }
 
   return {
     HOME: home,
-    USERPROFILE: home,
     HOMEDRIVE: root,
     HOMEPATH: home.slice(root.length),
+    USERPROFILE: home,
   }
 }
 
@@ -128,7 +128,8 @@ try {
   fs.mkdirSync(loginTypesDirectory)
   fs.mkdirSync(isolatedHome)
 
-  const packOutput = npm(packageRoot,
+  const packOutput = npm(
+    packageRoot,
     'pack',
     '--ignore-scripts',
     '--json',

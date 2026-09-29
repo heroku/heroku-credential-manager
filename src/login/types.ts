@@ -16,37 +16,36 @@ export type LoginOptions = {
 /** Account and token persisted by a successful login. */
 export type LoginResult = AuthEntry
 
-/** Options passed to the injected HTTP transport for one request. */
-export type LoginHttpRequest = {
-  /** Value serialized as the request JSON body. */
-  body?: unknown
+/** Options shared by Heroku Platform API requests. */
+export type HerokuApiRequestOptions = {
   /** Request headers. */
   headers?: Record<string, string>
-  /** HTTP method used by login. */
-  method: 'DELETE' | 'GET' | 'POST'
   /** Signal for cancellation of login or logout orchestration. */
   signal?: AbortSignal
   /** Timeout for this individual HTTP request, in milliseconds. */
   timeoutMs?: number
 }
 
-/** Transport-neutral HTTP response returned by {@link LoginHttp}. */
-export type LoginHttpResponse<T> = {
-  /** Parsed response body. */
+/** Normalized response returned by the injected Heroku Platform API client. */
+export type HerokuApiResponse<T> = {
+  /** Parsed response body, when one is returned. */
   body: T
-  /** Response headers keyed by lower-case header name where supported by the transport. */
-  headers: Record<string, string>
-  /** Whether the response status is successful. */
-  ok: boolean
+  /** Response headers keyed by lower-case header name. */
+  headers: Record<string, string | string[] | undefined>
   /** HTTP response status code. */
   status: number
 }
 
-/** Injectable HTTP transport used by all login and logout requests. */
-export interface LoginHttp {
-  /** Performs one HTTP request. Implementations should honor both `signal` and `timeoutMs`. */
-  request<T>(url: string, options: LoginHttpRequest): Promise<LoginHttpResponse<T>>
+/** Package-local shape required from a Heroku Platform API client. */
+export interface HerokuApiClientLike {
+  /** Deletes a Platform API resource. */
+  delete<T>(path: string, options?: HerokuApiRequestOptions): Promise<HerokuApiResponse<T>>
+  /** Gets a Platform API resource. */
+  get<T>(path: string, options?: HerokuApiRequestOptions): Promise<HerokuApiResponse<T>>
 }
+
+/** Fetch-compatible function used for OAuth POSTs and non-Platform HTTP requests. */
+export type FetchLike = (input: Request | string | URL, init?: RequestInit) => Promise<Response>
 
 /** Result from the login-method prompt. */
 export type LoginPromptSelection
@@ -183,16 +182,18 @@ export type LoginConfig = {
   timeoutMs?: number
 }
 
-/** Optional adapters and trusted configuration used to construct a login client. */
+/** Adapters and trusted configuration used to construct a login client. */
 export type LoginDependencies = {
+  /** Constructs a Heroku Platform API client authenticated with the operation token. */
+  apiClientForToken(token: string): HerokuApiClientLike
   /** Browser launcher. Browser-open failures remain non-fatal because manual URLs are emitted. */
   browser?: LoginBrowser
   /** Trusted endpoint, persistence-directory, and timeout configuration. */
   config?: LoginConfig
   /** Environment-variable reader. */
   environment?: LoginEnvironment
-  /** HTTP transport. */
-  http?: LoginHttp
+  /** Fetch implementation for OAuth POSTs and non-Platform HTTP requests. */
+  fetch?: FetchLike
   /** User-facing output. */
   output?: LoginOutput
   /** Progress indicator. */

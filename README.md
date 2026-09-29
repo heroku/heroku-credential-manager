@@ -72,13 +72,31 @@ Top-level `removeAuth` uses a supplied account to guard `.netrc` entries by logi
 
 ### Injected login consumers
 
-Login is intentionally available only from the `/login` subpath. Consumers provide semantic prompts and may inject HTTP, browser opening, output/progress, timers, environment/config, and storage behavior. This keeps command frameworks and browser packages outside the credential manager:
+Login is intentionally available only from the `/login` subpath. Consumers provide semantic prompts and a narrow Heroku API client factory, and may inject a Fetch-compatible function, browser opening, output/progress, timers, environment/config, and storage behavior. This keeps command frameworks, `@heroku/heroku-fetch`, and browser packages outside the credential manager:
 
 ```typescript
-import {Login} from '@heroku/heroku-credential-manager/login'
+import {
+  type HerokuApiClientLike,
+  Login,
+  type LoginDependencies,
+} from '@heroku/heroku-credential-manager/login'
+
+import {createPlatformApiClient} from './platform-api-client.js'
+
+// This adapter belongs to the consumer. Create a fresh client authorized with
+// the token supplied for each operation; do not capture an ambient CLI token.
+const apiClientForToken: LoginDependencies['apiClientForToken'] = token => {
+  const client = createPlatformApiClient({token})
+  return {
+    delete: (path, options) => client.delete(path, options),
+    get: (path, options) => client.get(path, options),
+  } satisfies HerokuApiClientLike
+}
 
 const login = new Login({
+  apiClientForToken,
   browser: {open: async url => launchBrowser(url)},
+  fetch: fetchImplementation,
   prompt: {
     accessToken: () => promptSecret('Access token'),
     email: previous => promptText('Email', previous),
@@ -93,9 +111,11 @@ const auth = await login.login({method: 'browser'})
 await login.logout(auth)
 ```
 
+`LoginDependencies.apiClientForToken` is a required, consumer-owned factory. `Login` passes it the token for the current login or logout operation, and the factory must return a client authorized with that token rather than an ambient credential. Its result implements the package-local `HerokuApiClientLike` contract: exactly generic `get(path, options?)` and `delete(path, options?)` methods returning `{body, headers, status}`. The injected `fetch` implements `FetchLike` and is used for OAuth POSTs and non-Platform requests. Request failures with an HTTP status are surfaced as `LoginRequestError`; its public body is limited to sanitized `id`, `message`, and `resource` fields.
+
 `login()` supports `browser`, `interactive`, and `sso`, returns a persisted `{account, token}`, never revokes an existing session during re-login, and rejects cancellation with `LoginCancelledError` (`exitCode` is `130` for Ctrl-C and `0` for `q`). Browser and SSO flows always emit a manual URL; failure to open a browser does not invalidate that flow. The default storage adapter uses this package's native/`.netrc` APIs. `logout(entry)` requires the returned credential entry and always attempts local API/Git credential cleanup, including when remote revocation fails. With the canonical `heroku-cli` credential service it also attempts configured login-state cleanup; isolated custom services intentionally skip the global `login.json` state. Backing-store failures can prevent guaranteed removal.
 
-Environment-derived `HEROKU_HOST` and `HEROKU_API_URL` values are restricted to Heroku domains and exact loopback hosts. Consumers that intentionally target a private or custom HTTPS deployment must provide `config.apiUrl` explicitly; callers are responsible for treating endpoint configuration as trusted. Base `apiUrl` and `loginHost` values must not contain a query or fragment, while `ssoUrl` is a complete URL and may contain both. For an explicit custom `apiUrl` or `HEROKU_API_URL`, omitting `gitHost` avoids writing the API credential for any Git host; set a trusted `gitHost` explicitly to opt in. The canonical `api.heroku.com` endpoint uses the existing `heroku-cli` native credential service. Other API hosts derive an isolated `heroku-cli@<normalized-api-host>` service, including an explicit port, so custom native credentials do not collide with production. `config.credentialService` can override that namespace with a nonempty, NUL-free value. Any service other than `heroku-cli` skips the global `login.json` account-selection state to avoid cross-service state collisions. The default HTTP adapter rejects all redirects and identifies itself with a package-specific User-Agent. CLI adapters must preserve the CLI's existing host allowlist and warning/fallback behavior.
+Environment-derived `HEROKU_HOST` and `HEROKU_API_URL` values are restricted to Heroku domains and exact loopback hosts. Consumers that intentionally target a private or custom HTTPS deployment must provide `config.apiUrl` explicitly; callers are responsible for treating endpoint configuration as trusted. Base `apiUrl` and `loginHost` values must not contain a query or fragment, while `ssoUrl` is a complete URL and may contain both. For an explicit custom `apiUrl` or `HEROKU_API_URL`, omitting `gitHost` avoids writing the API credential for any Git host; set a trusted `gitHost` explicitly to opt in. The canonical `api.heroku.com` endpoint uses the existing `heroku-cli` native credential service. Other API hosts derive an isolated `heroku-cli@<normalized-api-host>` service, including an explicit port, so custom native credentials do not collide with production. `config.credentialService` can override that namespace with a nonempty, NUL-free value. Any service other than `heroku-cli` skips the global `login.json` account-selection state to avoid cross-service state collisions. Built-in fetch-based requests reject all redirects and identify themselves with a package-specific User-Agent. CLI adapters must preserve the CLI's existing host allowlist and warning/fallback behavior.
 
 `config.timeoutMs` limits login acquisition (10 minutes by default), but does not cancel credential persistence after credentials have been acquired. For logout, the same timeout is the remote-revocation deadline: it aborts remote requests, while already-started local credential and login-state cleanup is awaited because those operations are not cancellable. Logout therefore has no overall time bound and remains pending indefinitely if local cleanup never settles. Cleanup passes the logged-out token as `expectedToken` as defense in depth, but this conditional check does not guarantee cross-process race safety. `config.requestTimeoutMs` separately limits each HTTP request. In forced-netrc mode (`HEROKU_NETRC_WRITE=true`), login credentials persist only to `.netrc`, interactive login prefills the account from the API host's `.netrc` entry, and login does not read or write native `login.json` state even when a native credential backend is installed. Logout and top-level `removeAuth` may still attempt OS-native cleanup so credentials left by an earlier storage mode do not remain stale.
 

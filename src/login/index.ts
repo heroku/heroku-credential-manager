@@ -2,6 +2,7 @@ import os from 'node:os'
 
 import type {AuthEntry} from '../lib/types.js'
 import type {
+  HerokuApiClientLike,
   LoginConfig,
   LoginDependencies,
   LoginEnvironment,
@@ -16,11 +17,11 @@ import type {
 
 import {browserLogin} from './browser.js'
 import {
-  checkedRequest, FetchLoginHttp, LoginHttpError, normalizeLoginHttpError, sanitizePublicError,
+  herokuApiDelete, herokuApiGet, LoginRequestError, normalizeLoginRequestError, sanitizePublicError,
 } from './http.js'
 import {interactiveLogin} from './interactive.js'
 import {
-  bearerHeaders, type RequestContext, requestOptions, THIRTY_DAYS,
+  type RequestContext, requestOptions, THIRTY_DAYS,
 } from './oauth.js'
 import {ssoLogin} from './sso.js'
 import {defaultLoginStorage} from './storage.js'
@@ -198,12 +199,12 @@ function resolveConfig(config: LoginConfig, environment: LoginEnvironment): Reso
   }
 }
 
-function bodyRecord(error: LoginHttpError): Record<string, unknown> | undefined {
+function bodyRecord(error: LoginRequestError): Record<string, unknown> | undefined {
   return error.body && typeof error.body === 'object' ? error.body as Record<string, unknown> : undefined
 }
 
 function expected(error: unknown, resource?: 'authorization' | 'session'): boolean {
-  if (!(error instanceof LoginHttpError)) return false
+  if (!(error instanceof LoginRequestError)) return false
   if (error.status === 401) return true
   const body = bodyRecord(error)
   return resource !== undefined && error.status === 404 && body?.id === 'not_found' && body.resource === resource
@@ -229,9 +230,10 @@ function hasAsterisks(value: string): boolean {
   return value.includes('*')
 }
 
-function headerValue(headers: Record<string, string>, name: string): string | undefined {
+function headerValue(headers: Record<string, string | string[] | undefined>, name: string): string | undefined {
   const header = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase())
-  return header?.[1]
+  const value = header?.[1]
+  return Array.isArray(value) ? value[0] : value
 }
 
 function requiredAuthEntry(value: unknown): asserts value is AuthEntry {
@@ -301,11 +303,12 @@ export class LoginCancelledError extends Error {
  * supply destinations they trust with credentials.
  */
 export class Login {
+  private readonly apiClientForToken: (token: string) => HerokuApiClientLike
   private readonly browser: LoginDependencies['browser']
   private readonly config: ResolvedConfig
   private readonly credentialHosts: string[]
   private readonly environment: LoginEnvironment
-  private readonly http: NonNullable<LoginDependencies['http']>
+  private readonly fetch: LoginDependencies['fetch']
   private readonly output: LoginOutput
   private readonly progress: LoginProgress
   private readonly prompt: LoginPrompt
@@ -315,13 +318,14 @@ export class Login {
   /**
    * Creates a client with the supplied adapters and trusted configuration, using package defaults when omitted.
    *
-   * @param dependencies - Optional adapters and trusted configuration
+   * @param dependencies - Adapters and trusted configuration
    */
-  constructor(dependencies: LoginDependencies = {}) {
+  constructor(dependencies: LoginDependencies) {
     this.environment = dependencies.environment ?? defaultEnvironment
     this.config = resolveConfig(dependencies.config ?? {}, this.environment)
     this.credentialHosts = [...new Set([this.config.apiHost, this.config.gitHost].filter((host): host is string => host !== undefined))]
-    this.http = dependencies.http ?? new FetchLoginHttp()
+    this.fetch = dependencies.fetch
+    this.apiClientForToken = dependencies.apiClientForToken
     this.output = dependencies.output ?? defaultOutput
     this.progress = dependencies.progress ?? defaultProgress
     this.prompt = dependencies.prompt ?? missingPrompt
@@ -436,10 +440,10 @@ export class Login {
     }
   }
 
-  private async authorizationCleanup(token: string, context: RequestContext): Promise<void> {
-    const authorizations = await this.listAuthorizations(token, context)
+  private async authorizationCleanup(token: string, api: HerokuApiClientLike, context: RequestContext): Promise<void> {
+    const authorizations = await this.listAuthorizations(token, api, context)
     if (!authorizations) return
-    const defaultToken = await this.defaultAuthorizationToken(token, context)
+    const defaultToken = await this.defaultAuthorizationToken(token, api, context)
     if (defaultToken === undefined) return
     if (defaultToken === REDACTED_TOKEN_ASTERISKS || defaultToken === token || defaultRedactedTokenMatches(token, defaultToken)) return
     if (hasAsterisks(defaultToken)) throw new Error('Login response included an invalid default authorization token mask')
@@ -448,19 +452,19 @@ export class Login {
     const results = await Promise.allSettled(identifiers.map(async id => {
       const encodedId = encodeURIComponent(id)
       try {
-        await checkedRequest<unknown>(
-          this.http,
-          `${this.config.apiUrl}/oauth/authorizations/${encodedId}`,
-          requestOptions(context, 'DELETE', {headers: bearerHeaders(token)}),
+        await herokuApiDelete<unknown>(
+          api,
+          `/oauth/authorizations/${encodedId}`,
+          requestOptions(context),
           [token, `Bearer ${token}`, id, encodedId],
         )
       } catch (error) {
-        const normalized = normalizeLoginHttpError(error)
-        if (!(normalized instanceof LoginHttpError) || normalized.status !== 401) throw normalized
+        const normalized = normalizeLoginRequestError(error)
+        if (!(normalized instanceof LoginRequestError) || normalized.status !== 401) throw normalized
       }
     }))
     const failure = results.find(result => result.status === 'rejected') as PromiseRejectedResult | undefined
-    if (failure) throw normalizeLoginHttpError(failure.reason)
+    if (failure) throw normalizeLoginRequestError(failure.reason)
   }
 
   private authSensitiveValues(entry?: AuthEntry): string[] {
@@ -473,12 +477,12 @@ export class Login {
     ]
   }
 
-  private async defaultAuthorizationToken(token: string, context: RequestContext): Promise<string | undefined> {
+  private async defaultAuthorizationToken(token: string, api: HerokuApiClientLike, context: RequestContext): Promise<string | undefined> {
     try {
-      const response = await checkedRequest<{access_token?: {token?: unknown}}>(
-        this.http,
-        `${this.config.apiUrl}/oauth/authorizations/~`,
-        requestOptions(context, 'GET', {headers: bearerHeaders(token)}),
+      const response = await herokuApiGet<{access_token?: {token?: unknown}}>(
+        api,
+        '/oauth/authorizations/~',
+        requestOptions(context),
         [token, `Bearer ${token}`],
       )
       if (typeof response.body?.access_token?.token !== 'string' || !response.body.access_token.token.trim()) {
@@ -487,8 +491,8 @@ export class Login {
 
       return response.body.access_token.token
     } catch (error) {
-      const normalized = normalizeLoginHttpError(error)
-      if (normalized instanceof LoginHttpError && normalized.status === 401) {
+      const normalized = normalizeLoginRequestError(error)
+      if (normalized instanceof LoginRequestError && normalized.status === 401) {
         throw new Error('Remote authorization revocation may be incomplete because the default authorization could not be verified')
       }
 
@@ -497,18 +501,18 @@ export class Login {
     }
   }
 
-  private async listAuthorizations(token: string, context: RequestContext): Promise<Authorization[] | undefined> {
+  private async listAuthorizations(token: string, api: HerokuApiClientLike, context: RequestContext): Promise<Authorization[] | undefined> {
     const authorizations: Authorization[] = []
     const ranges = new Set<string>()
     let range: string | undefined
     try {
       for (let page = 0; ; page++) {
         if (page >= MAX_AUTHORIZATION_PAGES) throw new Error(`Authorization pagination exceeded ${MAX_AUTHORIZATION_PAGES} pages`)
-        const headers = bearerHeaders(token)
+        const headers: Record<string, string> = {}
         if (range !== undefined) headers.Range = range
         // Pagination must remain sequential so no authorization is deleted from a partial snapshot.
         // eslint-disable-next-line no-await-in-loop
-        const response = await checkedRequest<unknown>(this.http, `${this.config.apiUrl}/oauth/authorizations`, requestOptions(context, 'GET', {
+        const response = await herokuApiGet<unknown>(api, '/oauth/authorizations', requestOptions(context, {
           headers,
         }), [token, `Bearer ${token}`])
         if (!Array.isArray(response.body)) throw new Error('Login response did not include an authorization list')
@@ -522,8 +526,8 @@ export class Login {
         range = nextRange
       }
     } catch (error) {
-      const normalized = normalizeLoginHttpError(error)
-      if (normalized instanceof LoginHttpError && normalized.status === 401) {
+      const normalized = normalizeLoginRequestError(error)
+      if (normalized instanceof LoginRequestError && normalized.status === 401) {
         if (range === undefined && authorizations.length === 0) return
         throw new Error('Remote authorization revocation may be incomplete because the authorization list could not be fully enumerated')
       }
@@ -535,11 +539,15 @@ export class Login {
   }
 
   private async performLogin(method: LoginMethod, options: LoginOptions, signal: AbortSignal): Promise<AuthEntry> {
-    const context: RequestContext = {http: this.http, requestTimeoutMs: this.config.requestTimeoutMs, signal}
+    const context: RequestContext = {
+      apiClientForToken: this.apiClientForToken,
+      fetch: this.fetch,
+      requestTimeoutMs: this.config.requestTimeoutMs,
+      signal,
+    }
     switch (method) {
       case 'browser': {
         return browserLogin(context, {
-          apiUrl: this.config.apiUrl,
           browser: this.browser,
           browserName: options.browser,
           environment: this.environment,
@@ -562,7 +570,6 @@ export class Login {
 
       case 'sso': {
         return ssoLogin(context, {
-          apiUrl: this.config.apiUrl,
           browser: this.browser,
           defaultOrganization: this.environment.get('HEROKU_ORGANIZATION'),
           output: this.output,
@@ -603,18 +610,28 @@ export class Login {
   }
 
   private async revoke(token: string, signal: AbortSignal): Promise<void> {
-    const context: RequestContext = {http: this.http, requestTimeoutMs: this.config.requestTimeoutMs, signal}
+    let api: HerokuApiClientLike
+    try {
+      api = await this.apiClientForToken(token)
+    } catch (error) {
+      throw sanitizePublicError(error, [token, `Bearer ${token}`])
+    }
+
+    const context: RequestContext = {
+      apiClientForToken: this.apiClientForToken,
+      fetch: this.fetch,
+      requestTimeoutMs: this.config.requestTimeoutMs,
+      signal,
+    }
     const session = (async () => {
       try {
-        await checkedRequest<unknown>(this.http, `${this.config.apiUrl}/oauth/sessions/~`, requestOptions(context, 'DELETE', {
-          headers: bearerHeaders(token),
-        }), [token, `Bearer ${token}`])
+        await herokuApiDelete<unknown>(api, '/oauth/sessions/~', requestOptions(context), [token, `Bearer ${token}`])
       } catch (error) {
-        const normalized = normalizeLoginHttpError(error)
+        const normalized = normalizeLoginRequestError(error)
         if (!expected(normalized, 'session')) throw normalized
       }
     })()
-    const authorizations = this.authorizationCleanup(token, context)
+    const authorizations = this.authorizationCleanup(token, api, context)
     const results = await Promise.allSettled([session, authorizations])
     const failure = results.find(result => result.status === 'rejected') as PromiseRejectedResult | undefined
     if (failure) throw failure.reason
@@ -624,7 +641,7 @@ export class Login {
     try {
       await operation()
     } catch (error) {
-      throw sanitizePublicError(error, sensitiveValues, {preserveCause: false, preserveHttpDetails: false})
+      throw sanitizePublicError(error, sensitiveValues, {preserveCause: false, preserveRequestDetails: false})
     }
   }
 
@@ -643,15 +660,16 @@ export class Login {
   }
 }
 
-export {LoginHttpError} from './http.js'
+export {LoginRequestError} from './http.js'
 export type {
+  FetchLike,
+  HerokuApiClientLike,
+  HerokuApiRequestOptions,
+  HerokuApiResponse,
   LoginBrowser,
   LoginConfig,
   LoginDependencies,
   LoginEnvironment,
-  LoginHttp,
-  LoginHttpRequest,
-  LoginHttpResponse,
   LoginMethod,
   LoginOptions,
   LoginOutput,

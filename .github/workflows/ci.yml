@@ -2,7 +2,10 @@ name: Test
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -31,11 +34,23 @@ jobs:
         run: npm run typecheck
       - name: build
         run: npm run build
-      - name: lint
-        if: runner.os == 'Linux'
-        run: npm run lint
       - name: packed tarball fixture
         run: npm run test:package
+
+  # Lint runs once in its own job (eslint output is identical across OS/node),
+  # concurrent with the matrix rather than as a gated step inside it.
+  lint:
+    runs-on: sfdc-hk-ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      - name: lint
+        run: npm run lint
 
   unit:
     needs: build-package
@@ -59,4 +74,4 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
       - run: npm ci
       - name: unit tests
-        run: npm run unit
+        run: npm run test:coverage

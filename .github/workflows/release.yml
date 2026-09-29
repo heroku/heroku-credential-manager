@@ -24,7 +24,7 @@ jobs:
       owner: ${{ github.repository_owner }}
       test_command: run test
       lint_command: run lint
-      build_command: run build
+      build_command: ''
     secrets:
       private_key: ${{ secrets.DEV_TOOLS_RELEASE_WORKFLOW_APP_PRIVATE_KEY }}
     permissions:

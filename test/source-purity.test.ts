@@ -14,6 +14,7 @@ const forbiddenRootPatterns = [
 const forbiddenLoginPatterns = [
   ['browser package', /(?:from|import)\s*\(?["'](?:open|playwright|puppeteer)["']/],
   ['command package', /@heroku(?:-cli)?\/(?:command|heroku-cli-util)/],
+  ['Heroku client package', /@heroku\/(?:heroku-fetch|sdk|types)/],
   ['Heroku fetch', /heroku-fetch/],
   ['HTTP call', /@heroku\/http-call/],
   ['inquirer', /(?:from|import)\s+["']inquirer["']/],
@@ -60,6 +61,14 @@ describe('source purity', function () {
   it('does not expose login from the package root', function () {
     const rootSource = fs.readFileSync(path.join(sourceRoot, 'index.ts'), 'utf8')
     expect(rootSource).to.not.match(/(?:from|import)\s+["'][^"']*login(?:\/index)?\.js["']/)
+  })
+
+  it('does not retain the generic LoginHttp source contract', function () {
+    const legacyContract = /\b(?:FetchLoginHttp|LoginHttp(?:Request|Response)?)\b/
+    const matches = sourceFiles(path.join(sourceRoot, 'login'))
+      .filter(file => legacyContract.test(fs.readFileSync(file, 'utf8')))
+      .map(file => path.relative(sourceRoot, file))
+    expect(matches).to.deep.equal([])
   })
 
   it('has no account-selector source file', function () {

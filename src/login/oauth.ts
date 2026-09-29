@@ -1,12 +1,15 @@
-import type {LoginHttp, LoginHttpRequest} from './types.js'
+import type {
+  FetchLike, HerokuApiClientLike, HerokuApiRequestOptions,
+} from './types.js'
 
-import {checkedRequest} from './http.js'
+import {fetchJsonPost, herokuApiGet, sanitizePublicError} from './http.js'
 
 export const THIRTY_DAYS = 60 * 60 * 24 * 30
 export const API_ACCEPT = 'application/vnd.heroku+json; version=3'
 
 export type RequestContext = {
-  http: LoginHttp
+  apiClientForToken(token: string): HerokuApiClientLike
+  fetch?: FetchLike
   requestTimeoutMs?: number
   signal: AbortSignal
 }
@@ -17,21 +20,12 @@ type OAuthAuthorization = {
   user?: {email?: unknown}
 }
 
-export function bearerHeaders(token: string): Record<string, string> {
-  return {
-    accept: API_ACCEPT,
-    authorization: `Bearer ${token}`,
-  }
-}
-
 export function requestOptions(
   context: RequestContext,
-  method: LoginHttpRequest['method'],
-  options: Omit<LoginHttpRequest, 'method' | 'signal' | 'timeoutMs'> = {},
-): LoginHttpRequest {
+  options: Omit<HerokuApiRequestOptions, 'signal' | 'timeoutMs'> = {},
+): HerokuApiRequestOptions {
   return {
     ...options,
-    method,
     signal: context.signal,
     timeoutMs: context.requestTimeoutMs,
   }
@@ -58,16 +52,21 @@ export async function createOAuthToken(context: RequestContext, options: {
   }
   if (options.secondFactor) headers['Heroku-Two-Factor-Code'] = options.secondFactor
 
-  const {body} = await checkedRequest<OAuthAuthorization>(context.http, `${options.apiUrl}/oauth/authorizations`, requestOptions(context, 'POST', {
-    body: {
+  const {body} = await fetchJsonPost<OAuthAuthorization>(
+    context.fetch,
+    `${options.apiUrl}/oauth/authorizations`,
+    {
       description: `Heroku CLI login from ${options.hostname}`,
       // API wire field.
       // eslint-disable-next-line camelcase
       expires_in: options.expiresIn || THIRTY_DAYS,
       scope: ['global'],
     },
-    headers,
-  }), [options.username, options.password, basicCredentials, authorization, options.secondFactor ?? ''])
+    requestOptions(context, {
+      headers,
+    }),
+    [options.username, options.password, basicCredentials, authorization, options.secondFactor ?? ''],
+  )
 
   return {
     account: requiredString(body?.user?.email, 'an account email'),
@@ -77,11 +76,15 @@ export async function createOAuthToken(context: RequestContext, options: {
 
 export async function validateAccount(
   context: RequestContext,
-  apiUrl: string,
   token: string,
 ): Promise<string> {
-  const {body} = await checkedRequest<{email?: unknown}>(context.http, `${apiUrl}/account`, requestOptions(context, 'GET', {
-    headers: bearerHeaders(token),
-  }), [token, `Bearer ${token}`])
+  let api: HerokuApiClientLike
+  try {
+    api = await context.apiClientForToken(token)
+  } catch (error) {
+    throw sanitizePublicError(error, [token, `Bearer ${token}`])
+  }
+
+  const {body} = await herokuApiGet<{email?: unknown}>(api, '/account', requestOptions(context), [token, `Bearer ${token}`])
   return requiredString(body?.email, 'an account email')
 }

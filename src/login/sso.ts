@@ -5,7 +5,6 @@ import type {
 import {type RequestContext, validateAccount} from './oauth.js'
 
 type SsoOptions = {
-  apiUrl: string
   browser?: LoginBrowser
   defaultOrganization?: string
   output: LoginOutput
@@ -43,6 +42,6 @@ export async function ssoLogin(
 
   const token = required(await options.prompt.accessToken(), 'Access token')
   options.progress.start('Validating token')
-  const account = await validateAccount(context, options.apiUrl, token)
+  const account = await validateAccount(context, token)
   return {account, token}
 }

@@ -1,6 +1,6 @@
 import type {LoginPrompt} from './types.js'
 
-import {LoginHttpError} from './http.js'
+import {LoginRequestError} from './http.js'
 import {createOAuthToken, type RequestContext} from './oauth.js'
 
 type InteractiveOptions = {
@@ -12,7 +12,7 @@ type InteractiveOptions = {
 }
 
 function errorId(error: unknown): string | undefined {
-  return error instanceof LoginHttpError ? error.id : undefined
+  return error instanceof LoginRequestError ? error.id : undefined
 }
 
 export async function interactiveLogin(
@@ -33,10 +33,10 @@ export async function interactiveLogin(
   } catch (error) {
     if (errorId(error) === 'device_trust_required') {
       const body = {
-        ...(error instanceof LoginHttpError ? error.body : {}),
+        ...(error instanceof LoginRequestError ? error.body : {}),
         message: 'The interactive flag requires Two-Factor Authentication to be enabled on your account. Please use heroku login.',
       }
-      throw new LoginHttpError((error as LoginHttpError).status, body)
+      throw new LoginRequestError((error as LoginRequestError).status, body)
     }
 
     if (errorId(error) !== 'two_factor') throw error

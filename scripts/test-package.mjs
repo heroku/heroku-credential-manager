@@ -122,6 +122,44 @@ function assertProductionDependencies(tree) {
   assert.deepEqual([...foundForbidden], [], `forbidden production dependencies found: ${[...foundForbidden].join(', ')}`)
 }
 
+function declarationFiles(directory) {
+  return fs.readdirSync(directory, {withFileTypes: true}).flatMap(entry => {
+    const file = path.join(directory, entry.name)
+    return entry.isDirectory() ? declarationFiles(file) : (entry.name.endsWith('.d.ts') ? [file] : [])
+  })
+}
+
+function assertLoginDeclarationSurface(installedPackageRoot) {
+  const loginDistRoot = path.join(installedPackageRoot, 'dist', 'login')
+  const declarations = declarationFiles(loginDistRoot).map(file => ({
+    content: fs.readFileSync(file, 'utf8'),
+    file: path.relative(loginDistRoot, file),
+  }))
+  assert(declarations.length > 0, 'packed login entry point does not contain declarations')
+  const declarationSource = declarations.map(({content}) => content).join('\n')
+  const requiredDeclarations = [
+    ['FetchLike', /\b(?:interface|type)\s+FetchLike\b/],
+    ['HerokuApiClientLike', /\b(?:interface|type)\s+HerokuApiClientLike\b/],
+    ['LoginRequestError', /\b(?:declare\s+)?class\s+LoginRequestError\b/],
+    ['LoginDependencies.apiClientForToken', /\bLoginDependencies\s*=\s*\{[^}]*\bapiClientForToken\b/s],
+  ]
+  const forbiddenDeclarations = [
+    ['legacy LoginHttp contract', /\bLoginHttp\w*\b/],
+    ['legacy fetch adapter', /\bFetchLoginHttp\b/],
+    ['generic request contract', /\brequest\s*<[^>]+>\s*\(/],
+    ['@heroku/heroku-fetch coupling', /(?:@heroku\/)?heroku-fetch/i],
+  ]
+
+  for (const [name, pattern] of requiredDeclarations) {
+    assert.match(declarationSource, pattern, `packed login declarations do not expose ${name}`)
+  }
+
+  for (const [name, pattern] of forbiddenDeclarations) {
+    const matches = declarations.filter(({content}) => pattern.test(content)).map(({file}) => file)
+    assert.deepEqual(matches, [], `${name} found in packed login declarations: ${matches.join(', ')}`)
+  }
+}
+
 try {
   fs.mkdirSync(packDirectory)
   fs.mkdirSync(consumerDirectory)
@@ -149,7 +187,11 @@ try {
   const installedPackageRoot = path.join(consumerDirectory, 'node_modules', ...packageName.split('/'))
   const installedPackage = JSON.parse(fs.readFileSync(path.join(installedPackageRoot, 'package.json'), 'utf8'))
   assert.deepEqual(Object.keys(installedPackage.exports).sort(), ['.', './login', './package.json'])
+  assert.deepEqual(Object.keys(installedPackage.exports['.']), ['types', 'default'])
+  assert.deepEqual(Object.keys(installedPackage.exports['./login']), ['types', 'default'])
+  assert.equal(installedPackage.publishConfig.access, 'restricted')
   const graphSize = assertSafeDistGraph(installedPackageRoot)
+  assertLoginDeclarationSurface(installedPackageRoot)
 
   const dependencyTree = JSON.parse(npm(consumerDirectory, 'ls', '--omit=dev', '--all', '--json'))
   assertProductionDependencies(dependencyTree)
@@ -194,12 +236,14 @@ void timers
 import type {AuthEntry, KeychainAuthEntry, NetrcAuthEntry, StorageConfig} from '${packageName}'
 import {getAuth, NativeCredentialNotFoundError, removeAuth, saveAuth} from '${packageName}'
 import type {
+  FetchLike,
+  HerokuApiClientLike,
+  HerokuApiRequestOptions,
+  HerokuApiResponse,
   LoginBrowser,
   LoginConfig,
   LoginEnvironment,
-  LoginHttp,
-  LoginHttpRequest,
-  LoginHttpResponse,
+  LoginDependencies,
   LoginMethod,
   LoginOptions,
   LoginOutput,
@@ -210,7 +254,17 @@ import type {
   LoginStorage,
   LoginTimers,
 } from '${packageName}/login'
-import {Login, LoginCancelledError, LoginHttpError} from '${packageName}/login'
+import {Login, LoginCancelledError, LoginRequestError} from '${packageName}/login'
+
+type Equal<Left, Right> =
+  (<Value>() => Value extends Left ? 1 : 2) extends
+    (<Value>() => Value extends Right ? 1 : 2) ? true : false
+type Expect<Value extends true> = Value
+type ExpectedHerokuApiClient = {
+  delete<T>(path: string, options?: HerokuApiRequestOptions): Promise<HerokuApiResponse<T>>
+  get<T>(path: string, options?: HerokuApiRequestOptions): Promise<HerokuApiResponse<T>>
+}
+type _HerokuApiClientContract = Expect<Equal<HerokuApiClientLike, ExpectedHerokuApiClient>>
 
 const auth: AuthEntry = {account: 'package-fixture@example.com', token: 'package-fixture-token'}
 const keychain: KeychainAuthEntry = {account: auth.account, service: 'package-fixture', token: auth.token}
@@ -220,10 +274,13 @@ const method: LoginMethod = 'browser'
 const options: LoginOptions = {method}
 const result: LoginResult = auth
 const config: LoginConfig = {apiUrl: 'https://api.heroku.com', credentialService: 'package-fixture-service'}
-const request: LoginHttpRequest = {method: 'GET'}
-const response: LoginHttpResponse<unknown> = {body: {}, headers: {}, ok: true, status: 200}
 const selection: LoginPromptSelection = {cancelled: 'quit'}
-const http: LoginHttp = {async request<T>() { return response as LoginHttpResponse<T> }}
+const fetchLike: FetchLike = fetch
+const apiClient: HerokuApiClientLike = {
+  async delete<T>() { return {body: undefined as T, headers: {}, status: 204} },
+  async get<T>() { return {body: undefined as T, headers: {}, status: 200} },
+}
+const dependencies: LoginDependencies = {apiClientForToken: () => apiClient, fetch: fetchLike}
 const prompt: LoginPrompt = {
   async accessToken() { return 'token' },
   async email() { return 'package-fixture@example.com' },
@@ -249,15 +306,15 @@ const loginStorage: LoginStorage = {
   async saveAuth(account, token, hosts, service) { void [account, token, hosts, service] },
   async writeLoginState() {},
 }
-const login = new Login({browser, config, environment, http, output, progress, prompt})
+const login = new Login({...dependencies, browser, config, environment, output, progress, prompt})
 void login.logout(auth)
 // @ts-expect-error logout requires the credential entry to remove
 void login.logout()
 const cancelled = new LoginCancelledError('quit')
-const httpError = new LoginHttpError(401, {id: 'unauthorized'})
+const requestError = new LoginRequestError(401, {id: 'unauthorized'})
 
-void [auth, browser, cancelled, config, environment, getAuth, http, httpError, keychain, login, loginStorage, method,
-  NativeCredentialNotFoundError, netrc, options, output, progress, prompt, removeAuth, request, response, result,
+void [apiClient, auth, browser, cancelled, config, dependencies, environment, fetchLike, getAuth, keychain, login, loginStorage, method,
+  NativeCredentialNotFoundError, netrc, options, output, progress, prompt, removeAuth, requestError, result,
   saveAuth, selection, storage, timers]
 `)
   fs.writeFileSync(path.join(consumerDirectory, 'tsconfig.json'), JSON.stringify({
@@ -278,6 +335,7 @@ void [auth, browser, cancelled, config, environment, getAuth, http, httpError, k
   fs.writeFileSync(path.join(consumerDirectory, 'runtime.mjs'), `
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import * as credentialManager from '${packageName}'
 import * as loginModule from '${packageName}/login'
@@ -291,27 +349,133 @@ assert.equal(missingCredentialError.name, 'NativeCredentialNotFoundError')
 assert.equal(missingCredentialError.message, 'Token not found')
 assert.equal(typeof loginModule.Login, 'function')
 assert.equal(typeof loginModule.LoginCancelledError, 'function')
-assert.equal(typeof loginModule.LoginHttpError, 'function')
-const fakeHttp = {async request() { throw new Error('not executed') }}
-const fakePrompt = {
+assert.equal(typeof loginModule.LoginRequestError, 'function')
+assert.equal(loginModule.LoginRequestError.prototype instanceof Error, true)
+
+const ambientTokenA = 'ambient-token-a'
+const operationTokenB = 'operation-token-b'
+const account = 'package-fixture@example.com'
+const apiCalls = []
+const ambientApiCalls = []
+const ambientApi = {
+  async delete(path, options) { ambientApiCalls.push({method: 'DELETE', options, path}); throw new Error('ambient client used') },
+  async get(path, options) { ambientApiCalls.push({method: 'GET', options, path}); throw new Error('ambient client used') },
+}
+const operationApi = {
+  async delete(path, options) {
+    apiCalls.push({method: 'DELETE', options, path})
+    return {body: undefined, headers: {}, status: 204}
+  },
+  async get(path, options) {
+    apiCalls.push({method: 'GET', options, path})
+    if (path === '/oauth/authorizations' && options?.headers?.Range === undefined) {
+      return {
+        body: [{access_token: {token: operationTokenB}, id: 'operation-authorization'}],
+        headers: {'nExT-rAnGe': 'id ..; cursor="operation-b"'},
+        status: 206,
+      }
+    }
+
+    if (path === '/oauth/authorizations' && options?.headers?.Range === 'id ..; cursor="operation-b"') {
+      return {body: [], headers: {}, status: 200}
+    }
+
+    if (path === '/oauth/authorizations/~') {
+      return {body: {access_token: {token: 'default-token'}}, headers: {}, status: 200}
+    }
+
+    throw new Error(\`unexpected Platform API GET \${path}\`)
+  },
+}
+assert.deepEqual(Object.keys(operationApi).sort(), ['delete', 'get'])
+assert.equal(operationApi.request, undefined)
+
+const factoryTokens = []
+const apiClientForToken = token => {
+  factoryTokens.push(token)
+  if (token === operationTokenB) return operationApi
+  if (token === ambientTokenA) return ambientApi
+  throw new Error(\`unexpected API client token: \${token}\`)
+}
+const prompt = {
   async accessToken() { return 'unused' },
-  async email() { return 'unused@example.com' },
-  async loginMethod() { return {cancelled: 'quit'} },
+  async email() { return account },
+  async loginMethod() { return {method: 'interactive'} },
   async organization() { return 'unused' },
-  async password() { return 'unused' },
+  async password() { return 'package-fixture-password' },
   async secondFactor() { return 'unused' },
 }
-const fakeStorage = {
+const storageCalls = []
+const storage = {
   async deleteLoginState() {},
-  async getAuth(account, host, service) { void [account, host, service]; throw new Error('not executed') },
+  async getAuth(account, host, service) { void [account, host, service]; throw new Error('no previous credential') },
   hasNativeStorage() { return false },
   async readLoginState() {},
-  async removeAuth(account, hosts, service, expectedToken) { void [account, hosts, service, expectedToken] },
-  async saveAuth(account, token, hosts, service) { void [account, token, hosts, service] },
+  async removeAuth(account, hosts, service, expectedToken) { storageCalls.push({account, expectedToken, hosts, operation: 'remove', service}) },
+  async saveAuth(account, token, hosts, service) { storageCalls.push({account, hosts, operation: 'save', service, token}) },
   async writeLoginState() {},
 }
-const login = new loginModule.Login({http: fakeHttp, prompt: fakePrompt, storage: fakeStorage})
+const fetchCalls = []
+const injectedFetch = async (url, init) => {
+  fetchCalls.push({init, url: String(url)})
+  return new Response(JSON.stringify({
+    access_token: {token: operationTokenB},
+    user: {email: account},
+  }), {
+    headers: {'content-type': 'application/json'},
+    status: 201,
+  })
+}
+const login = new loginModule.Login({
+  apiClientForToken,
+  config: {requestTimeoutMs: 4321},
+  fetch: injectedFetch,
+  prompt,
+  storage,
+})
 assert.equal(login instanceof loginModule.Login, true)
+const auth = await login.login({method: 'interactive'})
+assert.deepEqual(auth, {account, token: operationTokenB})
+assert.equal(fetchCalls.length, 1)
+assert.equal(fetchCalls[0].url, 'https://api.heroku.com/oauth/authorizations')
+assert.equal(fetchCalls[0].init.method, 'POST')
+assert.equal(fetchCalls[0].init.redirect, 'error')
+assert.equal(fetchCalls[0].init.signal instanceof AbortSignal, true)
+assert.equal(fetchCalls[0].init.headers.accept, 'application/vnd.heroku+json; version=3')
+assert.equal(fetchCalls[0].init.headers['content-type'], 'application/json')
+assert.match(fetchCalls[0].init.headers.authorization, /^Basic /)
+assert.deepEqual(JSON.parse(fetchCalls[0].init.body), {
+  description: \`Heroku CLI login from \${os.hostname()}\`,
+  expires_in: 2_592_000,
+  scope: ['global'],
+})
+
+await login.logout({account, token: operationTokenB})
+assert.deepEqual(factoryTokens, [operationTokenB])
+assert.deepEqual(ambientApiCalls, [])
+assert.equal(fetchCalls.length, 1)
+assert.deepEqual(apiCalls.map(({method, path}) => [method, path]), [
+  ['DELETE', '/oauth/sessions/~'],
+  ['GET', '/oauth/authorizations'],
+  ['GET', '/oauth/authorizations'],
+  ['GET', '/oauth/authorizations/~'],
+  ['DELETE', '/oauth/authorizations/operation-authorization'],
+])
+const operationSignal = apiCalls[0].options.signal
+assert.equal(operationSignal instanceof AbortSignal, true)
+assert.equal(apiCalls.every(({options}) => options.signal === operationSignal), true)
+assert.equal(apiCalls.every(({options}) => options.timeoutMs === 4321), true)
+assert.deepEqual(apiCalls.map(({options}) => options.headers), [
+  undefined,
+  {},
+  {Range: 'id ..; cursor="operation-b"'},
+  undefined,
+  undefined,
+])
+assert.deepEqual(storageCalls, [
+  {account, hosts: ['api.heroku.com', 'git.heroku.com'], operation: 'save', service: 'heroku-cli', token: operationTokenB},
+  {account, expectedToken: operationTokenB, hosts: ['api.heroku.com', 'git.heroku.com'], operation: 'remove', service: 'heroku-cli'},
+])
 
 const temporaryRoot = ${JSON.stringify(temporaryRoot)}
 const expectedHome = ${JSON.stringify(isolatedHome)}
@@ -321,7 +485,6 @@ assert.equal(process.env.USERPROFILE, expectedHome)
 assert.equal(path.join(process.env.HOMEDRIVE, process.env.HOMEPATH), expectedHome)
 assert.equal(path.relative(temporaryRoot, netrcPath).startsWith('..'), false)
 
-const account = 'package-fixture@example.com'
 const host = 'package-fixture.heroku.com'
 const token = 'package-fixture-token'
 await credentialManager.saveAuth(account, token, [host])
@@ -331,55 +494,6 @@ assert.deepEqual(await credentialManager.getAuth(account, host), {account, token
 await credentialManager.removeAuth(account, [host])
 await assert.rejects(credentialManager.getAuth(account, host), /No auth found|No credentials found/)
 
-const dataDir = path.join(temporaryRoot, 'login-data')
-const staleAccount = 'stale-native@example.com'
-const netrcAccount = 'netrc-prefill@example.com'
-const loginToken = 'packed-login-token'
-await credentialManager.writeLoginState(dataDir, staleAccount)
-await credentialManager.saveAuth(netrcAccount, 'old-netrc-token', ['api.heroku.com'])
-let previousAccount
-const packedPrompt = {
-  async accessToken() { return 'unused' },
-  async email(previous) { previousAccount = previous; return netrcAccount },
-  async loginMethod() { return {method: 'browser'} },
-  async organization() { return 'unused' },
-  async password() { return 'packed-password' },
-  async secondFactor() { return 'unused' },
-}
-const packedHttp = {
-  async request(url, options) {
-    if (options.method === 'POST' && url.endsWith('/oauth/authorizations')) {
-      return {
-        body: {access_token: {token: loginToken}, user: {email: netrcAccount}},
-        headers: {},
-        ok: true,
-        status: 200,
-      }
-    }
-
-    if (options.method === 'DELETE' && url.endsWith('/oauth/sessions/~')) {
-      return {body: {id: 'not_found', resource: 'session'}, headers: {}, ok: false, status: 404}
-    }
-
-    if (options.method === 'GET' && url.endsWith('/oauth/authorizations')) {
-      return {body: {id: 'unauthorized'}, headers: {}, ok: false, status: 401}
-    }
-
-    throw new Error(\`Unexpected packed login request: \${options.method} \${url}\`)
-  },
-}
-const packedLogin = new loginModule.Login({
-  config: {dataDir},
-  http: packedHttp,
-  prompt: packedPrompt,
-})
-const packedAuth = await packedLogin.login({method: 'interactive'})
-assert.equal(previousAccount, netrcAccount)
-assert.deepEqual(packedAuth, {account: netrcAccount, token: loginToken})
-assert.deepEqual(await credentialManager.readLoginState(dataDir), {account: staleAccount})
-assert.deepEqual(await credentialManager.getAuth(netrcAccount, 'api.heroku.com'), packedAuth)
-await packedLogin.logout(packedAuth)
-await assert.rejects(credentialManager.getAuth(undefined, 'api.heroku.com'), /No auth found|No credentials found/)
 `)
   execFileSync(process.execPath, ['runtime.mjs'], {
     cwd: consumerDirectory,

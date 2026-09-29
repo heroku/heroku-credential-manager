@@ -3,12 +3,13 @@ import chaiAsPromised from 'chai-as-promised'
 import sinon from 'sinon'
 
 import type {
+  FetchLike,
+  HerokuApiClientLike,
+  HerokuApiRequestOptions,
+  HerokuApiResponse,
   LoginBrowser,
   LoginDependencies,
   LoginEnvironment,
-  LoginHttp,
-  LoginHttpRequest,
-  LoginHttpResponse,
   LoginOutput,
   LoginProgress,
   LoginPrompt,
@@ -17,32 +18,60 @@ import type {
   LoginTimers,
 } from '../../src/login/index.js'
 
-import {Login, LoginCancelledError, LoginHttpError} from '../../src/login/index.js'
+import {Login, LoginCancelledError, LoginRequestError} from '../../src/login/index.js'
 
-/* eslint-disable camelcase, mocha/max-top-level-suites, no-await-in-loop, unicorn/consistent-function-scoping */
+/* eslint-disable camelcase, max-lines, mocha/max-top-level-suites, no-await-in-loop, unicorn/consistent-function-scoping */
 
 use(chaiAsPromised)
 
-type Request = {options: LoginHttpRequest, url: string}
+type ApiRequest = {method: 'DELETE' | 'GET', options?: HerokuApiRequestOptions, path: string}
+type FetchRequest = {
+  options: Omit<RequestInit, 'body' | 'headers'> & {body?: unknown, headers?: Record<string, string>}
+  url: string
+}
 type TimerHandler = () => void
 
-class FakeHttp implements LoginHttp {
-  requests: Request[] = []
-  responses: Array<Error | LoginHttpResponse<unknown>> = []
+class FakeApiClient implements HerokuApiClientLike {
+  requests: ApiRequest[] = []
+  responses: Array<Error | HerokuApiResponse<unknown>> = []
 
-  async request<T>(url: string, options: LoginHttpRequest): Promise<LoginHttpResponse<T>> {
-    this.requests.push({options, url})
+  async delete<T>(path: string, options?: HerokuApiRequestOptions): Promise<HerokuApiResponse<T>> {
+    return this.request<T>('DELETE', path, options)
+  }
+
+  async get<T>(path: string, options?: HerokuApiRequestOptions): Promise<HerokuApiResponse<T>> {
+    return this.request<T>('GET', path, options)
+  }
+
+  private async request<T>(method: ApiRequest['method'], path: string, options?: HerokuApiRequestOptions): Promise<HerokuApiResponse<T>> {
+    this.requests.push({method, options, path})
     const response = this.responses.shift()
     if (response instanceof Error) throw response
-    if (!response) throw new Error(`Unexpected request: ${options.method} ${url}`)
-    return response as LoginHttpResponse<T>
+    if (!response) throw new Error(`Unexpected request: ${method} ${path}`)
+    return response as HerokuApiResponse<T>
   }
 }
 
-function response<T>(body: T, status = 200, headers: Record<string, string> = {}): LoginHttpResponse<T> {
-  return {
-    body, headers, ok: status >= 200 && status < 300, status,
+class FakeFetch {
+  readonly fetch: FetchLike = async (input, init) => {
+    const headers = Object.fromEntries(new Headers(init?.headers).entries())
+    const parsedBody = typeof init?.body === 'string' ? JSON.parse(init.body) as unknown : init?.body
+    this.requests.push({options: {...init, body: parsedBody, headers}, url: input.toString()})
+    const response = this.responses.shift()
+    if (response instanceof Error) throw response
+    if (!response) throw new Error(`Unexpected fetch: ${init?.method} ${input.toString()}`)
+
+    const responseBody = response.body === undefined
+      ? null
+      : (typeof response.body === 'string' ? response.body : JSON.stringify(response.body))
+    return new Response(responseBody, {headers: response.headers as HeadersInit, status: response.status})
   }
+  requests: FetchRequest[] = []
+  responses: Array<Error | HerokuApiResponse<unknown>> = []
+}
+
+function response<T>(body: T, status = 200, headers: Record<string, string> = {}): HerokuApiResponse<T> {
+  return {body, headers, status}
 }
 
 function environment(values: Record<string, string | undefined> = {}): LoginEnvironment {
@@ -124,8 +153,12 @@ function fakeTimers(): LoginTimers & {cleared: number, fire(): void, pending: nu
   return result
 }
 
-function loginFixture(overrides: LoginDependencies = {}) {
-  const http = overrides.http ?? new FakeHttp()
+type LoginFixtureOverrides = Partial<LoginDependencies>
+
+function loginFixture(overrides: LoginFixtureOverrides = {}) {
+  const api = new FakeApiClient()
+  const fetch = new FakeFetch()
+  const apiClientForToken = overrides.apiClientForToken ?? (() => api)
   const loginOutput = overrides.output ?? output()
   const loginProgress = overrides.progress ?? progress()
   const loginStorage = overrides.storage ?? storage()
@@ -148,15 +181,55 @@ function loginFixture(overrides: LoginDependencies = {}) {
     storage: loginStorage,
     timers,
     ...overrides,
-    http,
+    apiClientForToken,
+    fetch: overrides.fetch ?? fetch.fetch,
   })
   return {
-    http: http as FakeHttp, login, output: loginOutput, progress: loginProgress, storage: loginStorage, timers,
+    api, fetch, login, output: loginOutput, progress: loginProgress, storage: loginStorage, timers,
   }
 }
 
-function queueInteractive(http: FakeHttp, account = 'jöhn@example.com', token = 'new-token') {
-  http.responses.push(response({access_token: {token}, user: {email: account}}))
+function consumerApiAdapter(operationToken: string) {
+  const ambientApi = new FakeApiClient()
+  const operationApi = new FakeApiClient()
+  const ambientFailure = (method: ApiRequest['method'], path: string): never => {
+    throw new Error(`Ambient client A must not handle ${method} ${path}`)
+  }
+
+  ambientApi.delete = async path => ambientFailure('DELETE', path)
+  ambientApi.get = async path => ambientFailure('GET', path)
+
+  // Mirrors a consumer adapter that already owns client A and constructs operation-scoped clients on demand.
+  // Returning adapter.api here is the realistic regression these tests guard against.
+  const adapter = {
+    api: ambientApi,
+    createApiClient: sinon.stub().callsFake(({token}: {token: string}) => {
+      if (token !== operationToken) throw new Error(`Unexpected API client token: ${token}`)
+      return operationApi
+    }),
+  }
+  const apiClientForToken = sinon.spy((token: string) => adapter.createApiClient({token}))
+
+  return {adapter, apiClientForToken, operationApi}
+}
+
+async function withObservedRequestTimeouts<T>(operation: () => Promise<T>): Promise<{result: T, timeouts: unknown[]}> {
+  const setTimeoutSpy = sinon.spy(globalThis, 'setTimeout')
+  try {
+    const result = await operation()
+    return {result, timeouts: setTimeoutSpy.getCalls().map(call => call.args[1])}
+  } finally {
+    setTimeoutSpy.restore()
+  }
+}
+
+function tokenBearingFactoryError(token: string): Error {
+  const authorization = `Bearer ${token}`
+  return new Error(`factory exposed ${token} ${authorization} ${Buffer.from(token).toString('base64')}`)
+}
+
+function queueInteractive(fetch: FakeFetch, account = 'jöhn@example.com', token = 'new-token') {
+  fetch.responses.push(response({access_token: {token}, user: {email: account}}))
 }
 
 function expectSafeErrorSurface(error: Error, sensitiveValues: readonly string[]): void {
@@ -183,7 +256,7 @@ describe('Login', function () {
     it('refuses HEROKU_API_KEY before prompts, storage, or HTTP mutation', async function () {
       const method = sinon.stub().resolves({method: 'browser'} as LoginPromptSelection)
       const saveAuth = sinon.stub().resolves()
-      const {http, login} = loginFixture({
+      const {fetch, login} = loginFixture({
         environment: environment({HEROKU_API_KEY: 'secret'}),
         prompt: prompt({loginMethod: method}),
         storage: storage({saveAuth}),
@@ -192,47 +265,47 @@ describe('Login', function () {
       await expect(login.login()).to.be.rejectedWith('Cannot log in with HEROKU_API_KEY set')
       expect(method.notCalled).to.be.true
       expect(saveAuth.notCalled).to.be.true
-      expect(http.requests).to.deep.equal([])
+      expect(fetch.requests).to.deep.equal([])
     })
 
     it('refuses expiration longer than thirty days before mutation', async function () {
       const saveAuth = sinon.stub().resolves()
-      const {http, login} = loginFixture({storage: storage({saveAuth})})
+      const {fetch, login} = loginFixture({storage: storage({saveAuth})})
       await expect(login.login({expiresIn: 60 * 60 * 24 * 31})).to.be.rejectedWith('Cannot set an expiration longer than thirty days')
       expect(saveAuth.notCalled).to.be.true
-      expect(http.requests).to.deep.equal([])
+      expect(fetch.requests).to.deep.equal([])
     })
 
     it('uses explicit method before expiresIn and legacy SSO', async function () {
-      const {http, login} = loginFixture({environment: environment({HEROKU_LEGACY_SSO: '1'})})
-      queueInteractive(http)
+      const {fetch, login} = loginFixture({environment: environment({HEROKU_LEGACY_SSO: '1'})})
+      queueInteractive(fetch)
       await login.login({expiresIn: 123, method: 'interactive'})
-      expect(http.requests[0].url).to.equal('https://api.heroku.test/oauth/authorizations')
+      expect(fetch.requests[0].url).to.equal('https://api.heroku.test/oauth/authorizations')
     })
 
     it('uses interactive for truthy expiresIn before legacy SSO', async function () {
-      const {http, login} = loginFixture({environment: environment({HEROKU_LEGACY_SSO: '1'})})
-      queueInteractive(http)
+      const {fetch, login} = loginFixture({environment: environment({HEROKU_LEGACY_SSO: '1'})})
+      queueInteractive(fetch)
       await login.login({expiresIn: 123})
-      expect(http.requests[0].options.body).to.include({expires_in: 123})
+      expect(fetch.requests[0].options.body).to.include({expires_in: 123})
     })
 
     it('uses legacy SSO when configured', async function () {
-      const {http, login} = loginFixture({environment: environment({HEROKU_LEGACY_SSO: '1', SSO_URL: 'https://sso.test/login'})})
-      http.responses.push(response({email: 'sso@example.com'}))
+      const {api, login} = loginFixture({environment: environment({HEROKU_LEGACY_SSO: '1', SSO_URL: 'https://sso.test/login'})})
+      api.responses.push(response({email: 'sso@example.com'}))
       expect(await login.login()).to.deep.equal({account: 'sso@example.com', token: 'sso-token'})
     })
 
     it('maps quit and Ctrl-C cancellations without HTTP or persistence', async function () {
       for (const [reason, exitCode] of [['quit', 0], ['interrupt', 130]] as const) {
-        const {http, login} = loginFixture({prompt: prompt({loginMethod: async () => ({cancelled: reason})})})
+        const {fetch, login} = loginFixture({prompt: prompt({loginMethod: async () => ({cancelled: reason})})})
         const error = await login.login().then(() => {
           throw new Error('Expected cancellation')
         }, error => error as LoginCancelledError)
         expect(error).to.be.instanceOf(LoginCancelledError)
         expect(error.reason).to.equal(reason)
         expect(error.exitCode).to.equal(exitCode)
-        expect(http.requests).to.deep.equal([])
+        expect(fetch.requests).to.deep.equal([])
       }
     })
 
@@ -259,7 +332,7 @@ describe('Login', function () {
         config: {apiUrl: 'https://custom-api.example.test'},
         storage: storage({saveAuth: saveFromUrl}),
       })
-      queueInteractive(first.http)
+      queueInteractive(first.fetch)
       await first.login.login({method: 'interactive'})
       expect(saveFromUrl.firstCall.args[2]).to.deep.equal(['custom-api.example.test'])
       expect(saveFromUrl.firstCall.args[3]).to.equal('heroku-cli@custom-api.example.test')
@@ -269,7 +342,7 @@ describe('Login', function () {
       const getAuth = sinon.stub().resolves({account: 'previous@example.com', token: 'old-token'})
       const saveAuth = sinon.stub().resolves()
       const fixture = loginFixture({config: {}, storage: storage({getAuth, saveAuth})})
-      queueInteractive(fixture.http)
+      queueInteractive(fixture.fetch)
       await fixture.login.login({method: 'interactive'})
       expect(getAuth.calledOnceWith(undefined, 'api.heroku.com', 'heroku-cli')).to.be.true
       expect(saveAuth.calledOnceWith('jöhn@example.com', 'new-token', ['api.heroku.com', 'git.heroku.com'], 'heroku-cli')).to.be.true
@@ -286,7 +359,7 @@ describe('Login', function () {
           getAuth, hasNativeStorage: () => true, readLoginState, saveAuth, writeLoginState,
         }),
       })
-      queueInteractive(fixture.http)
+      queueInteractive(fixture.fetch)
       await fixture.login.login({method: 'interactive'})
       expect(readLoginState.notCalled).to.be.true
       expect(getAuth.calledOnceWith(undefined, 'custom-api.example.test:8443', 'heroku-cli@custom-api.example.test:8443')).to.be.true
@@ -314,7 +387,7 @@ describe('Login', function () {
           getAuth, hasNativeStorage: () => true, readLoginState, saveAuth, writeLoginState,
         }),
       })
-      queueInteractive(fixture.http)
+      queueInteractive(fixture.fetch)
       await fixture.login.login({method: 'interactive'})
       expect(readLoginState.notCalled).to.be.true
       expect(getAuth.calledOnceWith(undefined, 'api.heroku.com', 'private-heroku-cli')).to.be.true
@@ -331,9 +404,9 @@ describe('Login', function () {
     it('preserves default, HEROKU_HOST, explicit Git, and HEROKU_GIT_HOST credential routing', async function () {
       const saveDefault = sinon.stub().resolves()
       const defaultFixture = loginFixture({config: {}, storage: storage({saveAuth: saveDefault})})
-      queueInteractive(defaultFixture.http)
+      queueInteractive(defaultFixture.fetch)
       await defaultFixture.login.login({method: 'interactive'})
-      expect(defaultFixture.http.requests[0].url).to.equal('https://api.heroku.com/oauth/authorizations')
+      expect(defaultFixture.fetch.requests[0].url).to.equal('https://api.heroku.com/oauth/authorizations')
       expect(saveDefault.firstCall.args[2]).to.deep.equal(['api.heroku.com', 'git.heroku.com'])
 
       const saveFromHost = sinon.stub().resolves()
@@ -342,7 +415,7 @@ describe('Login', function () {
         environment: environment({HEROKU_HOST: 'staging.heroku.com'}),
         storage: storage({saveAuth: saveFromHost}),
       })
-      queueInteractive(second.http)
+      queueInteractive(second.fetch)
       await second.login.login({method: 'interactive'})
       expect(saveFromHost.firstCall.args[2]).to.deep.equal(['api.staging.heroku.com', 'git.staging.heroku.com'])
 
@@ -352,7 +425,7 @@ describe('Login', function () {
         environment: environment({HEROKU_HOST: 'https://api.staging.heroku.com'}),
         storage: storage({saveAuth: saveFromUrlHost}),
       })
-      queueInteractive(third.http)
+      queueInteractive(third.fetch)
       await third.login.login({method: 'interactive'})
       expect(saveFromUrlHost.firstCall.args[2]).to.deep.equal(['api.staging.heroku.com'])
 
@@ -363,7 +436,7 @@ describe('Login', function () {
       ] as const) {
         const saveAuth = sinon.stub().resolves()
         const fixture = loginFixture({config, environment: environment(values), storage: storage({saveAuth})})
-        queueInteractive(fixture.http)
+        queueInteractive(fixture.fetch)
         await fixture.login.login({method: 'interactive'})
         expect(saveAuth.firstCall.args[2]).to.deep.equal(expected)
       }
@@ -376,9 +449,9 @@ describe('Login', function () {
         environment: environment({HEROKU_API_URL: 'https://api.staging.heroku.com/v3/'}),
         storage: storage({saveAuth}),
       })
-      queueInteractive(fixture.http)
+      queueInteractive(fixture.fetch)
       await fixture.login.login({method: 'interactive'})
-      expect(fixture.http.requests[0].url).to.equal('https://api.staging.heroku.com/v3/oauth/authorizations')
+      expect(fixture.fetch.requests[0].url).to.equal('https://api.staging.heroku.com/v3/oauth/authorizations')
       expect(saveAuth.firstCall.args[2]).to.deep.equal(['api.staging.heroku.com'])
     })
 
@@ -389,13 +462,13 @@ describe('Login', function () {
         config: {},
         environment: environment({HEROKU_LOGIN_HOST: 'https://cli-auth.staging.heroku.com/login/'}),
       })
-      fixture.http.responses.push(
+      fixture.fetch.responses.push(
         response({browser_url: '/browser/abc', cli_url: '/cli/abc', token: 'temporary-token'}),
         response({access_token: 'browser-token'}),
-        response({email: 'browser@example.com'}),
       )
+      fixture.api.responses.push(response({email: 'browser@example.com'}))
       await fixture.login.login({method: 'browser'})
-      expect(fixture.http.requests[0].url).to.equal('https://cli-auth.staging.heroku.com/login/auth')
+      expect(fixture.fetch.requests[0].url).to.equal('https://cli-auth.staging.heroku.com/login/auth')
       expect(open.calledOnceWith('https://cli-auth.staging.heroku.com/browser/abc')).to.be.true
     })
 
@@ -403,9 +476,9 @@ describe('Login', function () {
       for (const apiUrl of ['https://custom-api.example.test:8443', 'https://custom-api.example.test:443', 'http://localhost:4567', 'http://[::1]:4567']) {
         const saveAuth = sinon.stub().resolves()
         const fixture = loginFixture({config: {apiUrl}, storage: storage({saveAuth})})
-        queueInteractive(fixture.http)
+        queueInteractive(fixture.fetch)
         await fixture.login.login({method: 'interactive'})
-        expect(fixture.http.requests[0].url).to.equal(`${new URL(apiUrl).href.replace(/\/$/, '')}/oauth/authorizations`)
+        expect(fixture.fetch.requests[0].url).to.equal(`${new URL(apiUrl).href.replace(/\/$/, '')}/oauth/authorizations`)
         const explicitPort = apiUrl.match(/:(\d+)$/)?.[1]
         const expectedHost = `${new URL(apiUrl).hostname}${explicitPort ? `:${explicitPort}` : ''}`
         expect(saveAuth.firstCall.args[2][0]).to.equal(expectedHost)
@@ -416,7 +489,7 @@ describe('Login', function () {
       for (const apiHost of ['custom-api.example.test:8443', 'custom-api.example.test:443', '[::1]:4567']) {
         const saveAuth = sinon.stub().resolves()
         const fixture = loginFixture({config: {apiHost}, storage: storage({saveAuth})})
-        queueInteractive(fixture.http)
+        queueInteractive(fixture.fetch)
         await fixture.login.login({method: 'interactive'})
         expect(saveAuth.firstCall.args[2][0]).to.equal(apiHost)
       }
@@ -428,7 +501,7 @@ describe('Login', function () {
         config: {apiHost: 'CUSTOM-API.EXAMPLE.TEST:8443'},
         storage: storage({saveAuth}),
       })
-      queueInteractive(fixture.http)
+      queueInteractive(fixture.fetch)
       await fixture.login.login({method: 'interactive'})
       expect(saveAuth.calledOnceWith(
         'jöhn@example.com',
@@ -445,18 +518,18 @@ describe('Login', function () {
         environment: environment({HEROKU_HOST: 'https://api.staging.heroku.com:8443'}),
         storage: storage({saveAuth}),
       })
-      queueInteractive(fixture.http)
+      queueInteractive(fixture.fetch)
       await fixture.login.login({method: 'interactive'})
-      expect(fixture.http.requests[0].url).to.equal('https://api.staging.heroku.com:8443/oauth/authorizations')
+      expect(fixture.fetch.requests[0].url).to.equal('https://api.staging.heroku.com:8443/oauth/authorizations')
       expect(saveAuth.firstCall.args[2]).to.deep.equal(['api.staging.heroku.com:8443'])
     })
 
     it('accepts HTTPS and loopback HTTP endpoints', async function () {
       for (const apiUrl of ['https://staging.example.test', 'http://localhost:3000', 'http://127.0.0.1:3000', 'http://[::1]:3000']) {
         const fixture = loginFixture({config: {apiUrl}})
-        queueInteractive(fixture.http)
+        queueInteractive(fixture.fetch)
         await fixture.login.login({method: 'interactive'})
-        expect(fixture.http.requests[0].url).to.equal(`${apiUrl}/oauth/authorizations`)
+        expect(fixture.fetch.requests[0].url).to.equal(`${apiUrl}/oauth/authorizations`)
       }
     })
 
@@ -483,10 +556,10 @@ describe('Login', function () {
         {ssoUrl: 'data:text/html,unsafe'},
       ]
       for (const config of unsafeConfigs) {
-        const http = new FakeHttp()
+        const fetch = new FakeFetch()
         const saveAuth = sinon.stub().resolves()
-        expect(() => loginFixture({config, http, storage: storage({saveAuth})})).to.throw()
-        expect(http.requests).to.deep.equal([])
+        expect(() => loginFixture({config, fetch: fetch.fetch, storage: storage({saveAuth})})).to.throw()
+        expect(fetch.requests).to.deep.equal([])
         expect(saveAuth.notCalled).to.be.true
       }
     })
@@ -512,15 +585,15 @@ describe('Login', function () {
         {HEROKU_LOGIN_HOST: 'https://cli-auth.heroku.com/path#'},
         {SSO_URL: 'data:text/html,unsafe'},
       ]) {
-        const http = new FakeHttp()
+        const fetch = new FakeFetch()
         const saveAuth = sinon.stub().resolves()
         expect(() => loginFixture({
           config: {},
           environment: environment(values),
-          http,
+          fetch: fetch.fetch,
           storage: storage({saveAuth}),
         })).to.throw()
-        expect(http.requests).to.deep.equal([])
+        expect(fetch.requests).to.deep.equal([])
         expect(saveAuth.notCalled).to.be.true
       }
     })
@@ -528,7 +601,7 @@ describe('Login', function () {
     it('allows an SSO URL containing a query and fragment', async function () {
       const open = sinon.stub().resolves()
       const fixture = loginFixture({browser: {open}, config: {ssoUrl: 'https://sso.example.test/login?source=cli#continue'}})
-      fixture.http.responses.push(response({email: 'sso@example.com'}))
+      fixture.api.responses.push(response({email: 'sso@example.com'}))
       await fixture.login.login({method: 'sso'})
       expect(open.calledOnceWith('https://sso.example.test/login?source=cli#continue')).to.be.true
     })
@@ -545,7 +618,7 @@ describe('Login', function () {
         'http://[::1]:3000',
       ]) {
         const fixture = loginFixture({config: {}, environment: environment({HEROKU_HOST: host})})
-        queueInteractive(fixture.http)
+        queueInteractive(fixture.fetch)
         await fixture.login.login({method: 'interactive'})
       }
     })
@@ -559,9 +632,9 @@ describe('Login', function () {
           config: {apiUrl: 'https://private.example.test'},
           environment: environment(values),
         })
-        queueInteractive(fixture.http)
+        queueInteractive(fixture.fetch)
         await fixture.login.login({method: 'interactive'})
-        expect(fixture.http.requests[0].url).to.equal('https://private.example.test/oauth/authorizations')
+        expect(fixture.fetch.requests[0].url).to.equal('https://private.example.test/oauth/authorizations')
       }
     })
   })
@@ -570,7 +643,7 @@ describe('Login', function () {
     it('prefills previous account from native login state and resolves stored auth', async function () {
       const email = sinon.stub().resolves('new@example.com')
       const getAuth = sinon.stub().resolves({account: 'previous@example.com', token: 'old-token'})
-      const {http, login} = loginFixture({
+      const {fetch, login} = loginFixture({
         prompt: prompt({email}),
         storage: storage({
           getAuth,
@@ -578,7 +651,7 @@ describe('Login', function () {
           readLoginState: async () => ({account: ' previous@example.com '}),
         }),
       })
-      http.responses.push(response({access_token: {token: 'new-token'}, user: {email: 'new@example.com'}}))
+      fetch.responses.push(response({access_token: {token: 'new-token'}, user: {email: 'new@example.com'}}))
       await login.login({method: 'interactive'})
       expect(getAuth.calledOnceWith('previous@example.com', 'api.heroku.test')).to.be.true
       expect(email.calledOnceWith('previous@example.com')).to.be.true
@@ -588,11 +661,11 @@ describe('Login', function () {
       const email = sinon.stub().resolves('new@example.com')
       const getAuth = sinon.stub().resolves({account: ' netrc@example.com ', token: 'old-token'})
       const readLoginState = sinon.stub().resolves({account: 'native@example.com'})
-      const {http, login} = loginFixture({
+      const {fetch, login} = loginFixture({
         prompt: prompt({email}),
         storage: storage({getAuth, hasNativeStorage: () => false, readLoginState}),
       })
-      http.responses.push(response({access_token: {token: 'new-token'}, user: {email: 'new@example.com'}}))
+      fetch.responses.push(response({access_token: {token: 'new-token'}, user: {email: 'new@example.com'}}))
       await login.login({method: 'interactive'})
       expect(readLoginState.notCalled).to.be.true
       expect(getAuth.calledOnceWith(undefined, 'api.heroku.test')).to.be.true
@@ -601,7 +674,7 @@ describe('Login', function () {
 
     it('continues when previous account lookup fails', async function () {
       const email = sinon.stub().resolves('new@example.com')
-      const {http, login} = loginFixture({
+      const {fetch, login} = loginFixture({
         prompt: prompt({email}),
         storage: storage({
           async getAuth() {
@@ -609,46 +682,60 @@ describe('Login', function () {
           },
         }),
       })
-      http.responses.push(response({access_token: {token: 'new-token'}, user: {email: 'new@example.com'}}))
+      fetch.responses.push(response({access_token: {token: 'new-token'}, user: {email: 'new@example.com'}}))
       await login.login({method: 'interactive'})
       expect(email.calledOnceWith()).to.be.true
     })
 
     it('sends UTF-8 Basic auth, global scope, and defaults to 30 days', async function () {
-      const {http, login} = loginFixture()
-      queueInteractive(http)
+      const {fetch, login} = loginFixture()
+      queueInteractive(fetch)
       await login.login({method: 'interactive'})
-      const request = http.requests[0]
+      const request = fetch.requests[0]
       expect(request.options.headers?.authorization).to.equal(`Basic ${Buffer.from('jöhn@example.com:pässword', 'utf8').toString('base64')}`)
       expect(request.options.body).to.deep.include({expires_in: 60 * 60 * 24 * 30, scope: ['global']})
       expect((request.options.body as {description: string}).description).to.equal('Heroku CLI login from fixture-host')
     })
 
     it('uses custom expiration and retries exactly once with exact 2FA header', async function () {
-      const {http, login} = loginFixture()
-      http.responses.push(
+      const {fetch, login} = loginFixture()
+      fetch.responses.push(
         response({id: 'two_factor', message: 'code required'}, 401),
         response({access_token: {token: '2fa-token'}, user: {email: 'jöhn@example.com'}}),
       )
       expect(await login.login({expiresIn: 12_345, method: 'interactive'})).to.deep.equal({account: 'jöhn@example.com', token: '2fa-token'})
-      expect(http.requests).to.have.length(2)
-      expect(http.requests[1].options.headers?.['Heroku-Two-Factor-Code']).to.equal('123456')
-      expect(http.requests[1].options.body).to.include({expires_in: 12_345})
+      expect(fetch.requests).to.have.length(2)
+      expect(fetch.requests[1].options.headers?.['heroku-two-factor-code']).to.equal('123456')
+      expect(fetch.requests[1].options.body).to.include({expires_in: 12_345})
+    })
+
+    it('applies the configured request timeout to the OAuth POST and 2FA retry through the fetch helper', async function () {
+      const requestTimeoutMs = 4321
+      const fixture = loginFixture({config: {requestTimeoutMs}})
+      fixture.fetch.responses.push(
+        response({id: 'two_factor', message: 'code required'}, 401),
+        response({access_token: {token: '2fa-token'}, user: {email: 'jöhn@example.com'}}),
+      )
+
+      const {result, timeouts} = await withObservedRequestTimeouts(() => fixture.login.login({method: 'interactive'}))
+      expect(result).to.deep.equal({account: 'jöhn@example.com', token: '2fa-token'})
+      expect(fixture.fetch.requests.map(request => request.options.method)).to.deep.equal(['POST', 'POST'])
+      expect(timeouts).to.deep.equal([requestTimeoutMs, requestTimeoutMs])
     })
 
     it('does not retry a failed 2FA submission', async function () {
-      const {http, login} = loginFixture()
-      http.responses.push(
+      const {fetch, login} = loginFixture()
+      fetch.responses.push(
         response({id: 'two_factor', message: 'code required'}, 401),
         response({id: 'two_factor', message: 'wrong code'}, 401),
       )
       await expect(login.login({method: 'interactive'})).to.be.rejectedWith('wrong code')
-      expect(http.requests).to.have.length(2)
+      expect(fetch.requests).to.have.length(2)
     })
 
     it('preserves structured device trust data with actionable message', async function () {
-      const {http, login} = loginFixture()
-      http.responses.push(response({
+      const {fetch, login} = loginFixture()
+      fetch.responses.push(response({
         id: 'device_trust_required',
         message: 'original',
         resource: 'authorization',
@@ -656,8 +743,8 @@ describe('Login', function () {
       }, 401))
       const error = await login.login({method: 'interactive'}).then(() => {
         throw new Error('Expected failure')
-      }, error => error as LoginHttpError)
-      expect(error).to.be.instanceOf(LoginHttpError)
+      }, error => error as LoginRequestError)
+      expect(error).to.be.instanceOf(LoginRequestError)
       expect(error.status).to.equal(401)
       expect(error.id).to.equal('device_trust_required')
       expect(error.body).to.deep.include({id: 'device_trust_required'})
@@ -669,23 +756,23 @@ describe('Login', function () {
 
     it('normalizes injected status/body errors and preserves useful IDs', async function () {
       const injected = Object.assign(new Error('request failed'), {body: {id: 'unauthorized', message: 'Not authorized'}, status: 401})
-      const {http, login} = loginFixture()
-      http.responses.push(injected)
+      const {fetch, login} = loginFixture()
+      fetch.responses.push(injected)
       const error = await login.login({method: 'interactive'}).then(() => {
         throw new Error('Expected failure')
-      }, error => error as LoginHttpError)
-      expect(error).to.be.instanceOf(LoginHttpError)
+      }, error => error as LoginRequestError)
+      expect(error).to.be.instanceOf(LoginRequestError)
       expect(error.status).to.equal(401)
       expect(error.message).to.equal('Not authorized\nError ID: unauthorized')
     })
 
     it('does not propagate credential-bearing injected diagnostics', async function () {
       const injected = Object.assign(new Error('jöhn@example.com pässword'), {body: {secret: 'body-secret'}, status: 401})
-      const {http, login} = loginFixture()
-      http.responses.push(injected)
+      const {fetch, login} = loginFixture()
+      fetch.responses.push(injected)
       const error = await login.login({method: 'interactive'}).then(() => {
         throw new Error('Expected failure')
-      }, error => error as LoginHttpError)
+      }, error => error as LoginRequestError)
       expect(error.message).to.equal('Login request failed with status 401')
       expect(error.body).to.equal(undefined)
       expect(JSON.stringify(error)).to.not.contain('body-secret')
@@ -697,8 +784,8 @@ describe('Login', function () {
       const basicCredentials = `${username}:${password}`
       const authorization = `Basic ${Buffer.from(basicCredentials, 'utf8').toString('base64')}`
       const injected = new Error(`proxy rejected ${username} ${password} ${Buffer.from(password).toString('base64')} ${basicCredentials} ${authorization}`)
-      const {http, login} = loginFixture()
-      http.responses.push(injected)
+      const {fetch, login} = loginFixture()
+      fetch.responses.push(injected)
       const error = await login.login({method: 'interactive'}).then(() => {
         throw new Error('Expected failure')
       }, error => error as Error)
@@ -710,8 +797,8 @@ describe('Login', function () {
 
     it('redacts two-factor credentials from retry transport diagnostics', async function () {
       const secondFactor = '123456'
-      const {http, login} = loginFixture()
-      http.responses.push(
+      const {fetch, login} = loginFixture()
+      fetch.responses.push(
         response({id: 'two_factor', message: 'code required'}, 401),
         new Error(`TLS failed for ${secondFactor} ${Buffer.from(secondFactor).toString('base64')}`),
       )
@@ -722,8 +809,8 @@ describe('Login', function () {
     })
 
     it('validates successful wire responses and does not leak credentials in diagnostics', async function () {
-      const {http, login} = loginFixture()
-      http.responses.push(response({access_token: {}, user: {}}))
+      const {fetch, login} = loginFixture()
+      fetch.responses.push(response({access_token: {}, user: {}}))
       const error = await login.login({method: 'interactive'}).then(() => {
         throw new Error('Expected failure')
       }, error => error as Error)
@@ -734,37 +821,86 @@ describe('Login', function () {
   })
 
   describe('browser', function () {
-    function queueBrowser(http: FakeHttp) {
-      http.responses.push(
+    function queueBrowser(fetch: FakeFetch) {
+      fetch.responses.push(
         response({browser_url: '/browser/abc', cli_url: '/cli/abc', token: 'temporary-token'}),
         response({access_token: 'browser-token'}),
-        response({email: 'browser@example.com'}),
       )
     }
 
     it('outputs a standalone manual URL, opens named browser, polls and validates with explicit Bearer tokens', async function () {
       const open = sinon.stub().resolves()
       const browser: LoginBrowser = {open}
-      const {http, login, output: loginOutput} = loginFixture({browser})
-      queueBrowser(http)
+      const {api, fetch, login, output: loginOutput} = loginFixture({browser})
+      queueBrowser(fetch)
+      api.responses.push(response({email: 'browser@example.com'}))
       expect(await login.login({browser: 'firefox', method: 'browser'})).to.deep.equal({account: 'browser@example.com', token: 'browser-token'})
       expect((loginOutput as ReturnType<typeof output>).messages).to.include('https://login.heroku.test/browser/abc')
       expect(open.calledOnceWith('https://login.heroku.test/browser/abc', {browser: 'firefox'})).to.be.true
-      expect(http.requests[1].options.headers?.authorization).to.equal('Bearer temporary-token')
-      expect(http.requests[2].options.headers?.authorization).to.equal('Bearer browser-token')
+      expect(fetch.requests[1].options.headers?.authorization).to.equal('Bearer temporary-token')
+      expect(fetch.requests).to.have.length(2)
+      expect(api.requests[0].path).to.equal('/account')
+    })
+
+    it('uses operation token B rather than ambient token A for browser account validation', async function () {
+      const operationTokenB = 'operation-token-b'
+      const {adapter, apiClientForToken, operationApi} = consumerApiAdapter(operationTokenB)
+      operationApi.responses.push(response({email: 'browser@example.com'}))
+      const {fetch, login} = loginFixture({apiClientForToken})
+      fetch.responses.push(
+        response({browser_url: '/browser', cli_url: '/cli', token: 'temporary-token'}),
+        response({access_token: operationTokenB}),
+      )
+
+      await login.login({method: 'browser'})
+      expect(apiClientForToken.calledOnceWith(operationTokenB)).to.be.true
+      expect(adapter.createApiClient.calledOnceWith({token: operationTokenB})).to.be.true
+      expect(operationApi.requests.map(request => request.path)).to.deep.equal(['/account'])
+      expect(adapter.api.requests).to.deep.equal([])
+      expect(fetch.requests.map(request => request.options.method)).to.deep.equal(['POST', 'GET'])
+    })
+
+    it('applies the configured request timeout to browser setup and polling through the fetch helpers', async function () {
+      const requestTimeoutMs = 5432
+      const fixture = loginFixture({config: {requestTimeoutMs}})
+      queueBrowser(fixture.fetch)
+      fixture.api.responses.push(response({email: 'browser@example.com'}))
+
+      const {result, timeouts} = await withObservedRequestTimeouts(() => fixture.login.login({method: 'browser'}))
+      expect(result).to.deep.equal({account: 'browser@example.com', token: 'browser-token'})
+      expect(fixture.fetch.requests.map(request => request.options.method)).to.deep.equal(['POST', 'GET'])
+      expect(timeouts).to.deep.equal([requestTimeoutMs, requestTimeoutMs])
+    })
+
+    it('sanitizes browser API client factory errors containing operation token variants', async function () {
+      const operationToken = 'browser-factory-token'
+      const apiClientForToken = sinon.stub().callsFake(() => {
+        throw tokenBearingFactoryError(operationToken)
+      })
+      const {fetch, login} = loginFixture({apiClientForToken})
+      fetch.responses.push(
+        response({browser_url: '/browser', cli_url: '/cli', token: 'temporary-token'}),
+        response({access_token: operationToken}),
+      )
+
+      const error = await login.login({method: 'browser'}).then(() => {
+        throw new Error('Expected failure')
+      }, error => error as Error)
+      expect(error.message).to.equal('factory exposed [SCRUBBED] [SCRUBBED] [SCRUBBED]')
+      expectSafeErrorSurface(error, [operationToken, `Bearer ${operationToken}`])
     })
 
     it('preserves browser and CLI path query strings', async function () {
       const open = sinon.stub().resolves()
-      const {http, login} = loginFixture({browser: {open}})
-      http.responses.push(
+      const {api, fetch, login} = loginFixture({browser: {open}})
+      fetch.responses.push(
         response({browser_url: '/browser/abc?source=cli', cli_url: '/cli/abc?wait=true', token: 'temporary-token'}),
         response({access_token: 'browser-token'}),
-        response({email: 'browser@example.com'}),
       )
+      api.responses.push(response({email: 'browser@example.com'}))
       await login.login({method: 'browser'})
       expect(open.calledOnceWith('https://login.heroku.test/browser/abc?source=cli')).to.be.true
-      expect(http.requests[1].url).to.equal('https://login.heroku.test/cli/abc?wait=true')
+      expect(fetch.requests[1].url).to.equal('https://login.heroku.test/cli/abc?wait=true')
     })
 
     it('rejects unsafe browser and CLI paths before opening or polling without exposing tokens', async function () {
@@ -774,7 +910,7 @@ describe('Login', function () {
           const open = sinon.stub().resolves()
           const loginOutput = output()
           const fixture = loginFixture({browser: {open}, output: loginOutput})
-          fixture.http.responses.push(response({
+          fixture.fetch.responses.push(response({
             browser_url: '/browser/safe',
             cli_url: '/cli/safe',
             [field]: unsafePath,
@@ -786,7 +922,7 @@ describe('Login', function () {
           expect(error.message).to.contain('must be a root-relative path')
           expect(error.message).to.not.contain('temporary-secret-token')
           expect(open.notCalled).to.be.true
-          expect(fixture.http.requests).to.have.length(1)
+          expect(fixture.fetch.requests).to.have.length(1)
           expect(loginOutput.messages.join('\n')).to.not.contain('temporary-secret-token')
           expect(loginOutput.warnings.join('\n')).to.not.contain('temporary-secret-token')
         }
@@ -805,8 +941,9 @@ describe('Login', function () {
         {environment: environment({HEROKU_TESTING_HEADLESS_LOGIN: '1'})},
       ]) {
         const loginOutput = output()
-        const {http, login} = loginFixture({...dependencies, output: loginOutput})
-        queueBrowser(http)
+        const {api, fetch, login} = loginFixture({...dependencies, output: loginOutput})
+        queueBrowser(fetch)
+        api.responses.push(response({email: 'browser@example.com'}))
         await login.login({method: 'browser'})
         expect(loginOutput.messages).to.include('https://login.heroku.test/browser/abc')
         expect(loginOutput.warnings.some(message => /manual URL|headlessly/.test(message))).to.be.true
@@ -814,35 +951,35 @@ describe('Login', function () {
     })
 
     it('retries status >500 three times after the first request', async function () {
-      const {http, login} = loginFixture()
-      http.responses.push(
+      const {api, fetch, login} = loginFixture()
+      fetch.responses.push(
         response({browser_url: '/browser', cli_url: '/cli', token: 'temp'}),
         response({message: 'bad'}, 501),
         response({message: 'bad'}, 503),
         response({message: 'bad'}, 599),
         response({access_token: 'token'}),
-        response({email: 'account@example.com'}),
       )
+      api.responses.push(response({email: 'account@example.com'}))
       await login.login({method: 'browser'})
-      expect(http.requests.filter(request => request.url.endsWith('/cli'))).to.have.length(4)
+      expect(fetch.requests.filter(request => request.url.endsWith('/cli'))).to.have.length(4)
     })
 
     it('does not retry 500 and rejects body errors', async function () {
       const first = loginFixture()
-      first.http.responses.push(response({browser_url: '/browser', cli_url: '/cli', token: 'temp'}), response({message: 'bad'}, 500))
+      first.fetch.responses.push(response({browser_url: '/browser', cli_url: '/cli', token: 'temp'}), response({message: 'bad'}, 500))
       await expect(first.login.login({method: 'browser'})).to.be.rejectedWith('bad')
-      expect(first.http.requests).to.have.length(2)
+      expect(first.fetch.requests).to.have.length(2)
 
       const second = loginFixture()
-      second.http.responses.push(response({browser_url: '/browser', cli_url: '/cli', token: 'temp'}), response({error: 'Denied'}))
+      second.fetch.responses.push(response({browser_url: '/browser', cli_url: '/cli', token: 'temp'}), response({error: 'Denied'}))
       await expect(second.login.login({method: 'browser'})).to.be.rejectedWith('Denied')
     })
 
     it('scrubs the temporary token from successful poll response errors', async function () {
       const temporaryToken = 'temporary-poll-token'
       const authorization = `Bearer ${temporaryToken}`
-      const {http, login} = loginFixture()
-      http.responses.push(
+      const {fetch, login} = loginFixture()
+      fetch.responses.push(
         response({browser_url: '/browser', cli_url: '/cli', token: temporaryToken}),
         response({error: `Denied ${temporaryToken} ${authorization} ${Buffer.from(authorization).toString('base64')}`}),
       )
@@ -856,8 +993,8 @@ describe('Login', function () {
 
     it('scrubs an acquired token from successful poll response errors', async function () {
       const acquiredToken = 'browser-acquired-secret'
-      const {http, login} = loginFixture()
-      http.responses.push(
+      const {fetch, login} = loginFixture()
+      fetch.responses.push(
         response({browser_url: '/browser', cli_url: '/cli', token: 'temporary-token'}),
         response({access_token: acquiredToken, error: `Denied Bearer ${acquiredToken}`}),
       )
@@ -875,8 +1012,9 @@ describe('Login', function () {
         [response({browser_url: '/browser', cli_url: '/cli', token: 'temp'}), response({})],
         [response({browser_url: '/browser', cli_url: '/cli', token: 'temp'}), response({access_token: 'token'}), response({})],
       ]) {
-        const {http, login} = loginFixture()
-        http.responses.push(...responses)
+        const {api, fetch, login} = loginFixture()
+        fetch.responses.push(...responses)
+        if (responses.length === 3) api.responses.push(response({}))
         await expect(login.login({method: 'browser'})).to.be.rejectedWith('Login response did not include')
       }
     })
@@ -888,12 +1026,13 @@ describe('Login', function () {
           'temporary-token',
         ],
         [
-          [response({browser_url: '/browser', cli_url: '/cli', token: 'temporary-token'}), response({access_token: 'browser-token'}), new Error(`DNS exposed ${Buffer.from('browser-token').toString('base64')}`)],
+          [response({browser_url: '/browser', cli_url: '/cli', token: 'temporary-token'}), response({access_token: 'browser-token'})],
           'browser-token',
         ],
       ] as const) {
-        const {http, login} = loginFixture()
-        http.responses.push(...responses)
+        const {api, fetch, login} = loginFixture()
+        fetch.responses.push(...responses)
+        if (secret === 'browser-token') api.responses.push(new Error(`DNS exposed ${Buffer.from('browser-token').toString('base64')}`))
         const error = await login.login({method: 'browser'}).then(() => {
           throw new Error('Expected failure')
         }, error => error as Error)
@@ -908,32 +1047,67 @@ describe('Login', function () {
     it('uses configured SSO URL and explicit bearer account validation', async function () {
       const organization = sinon.stub().resolves('unused')
       const open = sinon.stub().resolves()
-      const {http, login, output: loginOutput} = loginFixture({
+      const {api, fetch, login, output: loginOutput} = loginFixture({
         browser: {open},
         config: {
           apiHost: 'api.heroku.test', apiUrl: 'https://api.heroku.test', gitHost: 'git.heroku.test', ssoUrl: 'https://configured.sso/login',
         },
         prompt: prompt({organization}),
       })
-      http.responses.push(response({email: 'sso@example.com'}))
+      api.responses.push(response({email: 'sso@example.com'}))
       await login.login({method: 'sso'})
       expect(organization.notCalled).to.be.true
       expect(open.calledOnceWith('https://configured.sso/login')).to.be.true
       expect((loginOutput as ReturnType<typeof output>).messages).to.include('https://configured.sso/login')
-      expect(http.requests[0].options.headers?.authorization).to.equal('Bearer sso-token')
+      expect(fetch.requests).to.have.length(0)
+      expect(api.requests[0].path).to.equal('/account')
+    })
+
+    it('uses operation token B rather than ambient token A for SSO account validation', async function () {
+      const operationTokenB = 'operation-token-b'
+      const {adapter, apiClientForToken, operationApi} = consumerApiAdapter(operationTokenB)
+      operationApi.responses.push(response({email: 'sso@example.com'}))
+      const fixture = loginFixture({
+        apiClientForToken,
+        prompt: prompt({accessToken: async () => operationTokenB}),
+      })
+
+      await fixture.login.login({method: 'sso'})
+      expect(apiClientForToken.calledOnceWith(operationTokenB)).to.be.true
+      expect(adapter.createApiClient.calledOnceWith({token: operationTokenB})).to.be.true
+      expect(operationApi.requests.map(request => request.path)).to.deep.equal(['/account'])
+      expect(adapter.api.requests).to.deep.equal([])
+      expect(fixture.fetch.requests).to.deep.equal([])
+    })
+
+    it('sanitizes SSO API client factory errors containing operation token variants', async function () {
+      const operationToken = 'sso-factory-token'
+      const apiClientForToken = sinon.stub().callsFake(() => {
+        throw tokenBearingFactoryError(operationToken)
+      })
+      const fixture = loginFixture({
+        apiClientForToken,
+        prompt: prompt({accessToken: async () => operationToken}),
+      })
+
+      const error = await fixture.login.login({method: 'sso'}).then(() => {
+        throw new Error('Expected failure')
+      }, error => error as Error)
+      expect(error.message).to.equal('factory exposed [SCRUBBED] [SCRUBBED] [SCRUBBED]')
+      expectSafeErrorSurface(error, [operationToken, `Bearer ${operationToken}`])
     })
 
     it('prompts with default organization, URL encodes it, and survives opener failure', async function () {
       const organization = sinon.stub().resolves('my org/one')
       const open = sinon.stub().rejects(new Error('headless'))
       const loginOutput = output()
-      const {http, login} = loginFixture({
+      const {api, login} = loginFixture({
         browser: {open},
         environment: environment({HEROKU_ORGANIZATION: 'default-org'}),
         output: loginOutput,
         prompt: prompt({organization}),
       })
-      http.responses.push(response({email: 'sso@example.com'}))
+      api.responses.push(response({email: 'sso@example.com'}))
       await login.login({method: 'sso'})
       expect(organization.calledOnceWith('default-org')).to.be.true
       expect(loginOutput.messages).to.include('https://sso.heroku.com/saml/my%20org%2Fone/init?cli=true')
@@ -944,14 +1118,14 @@ describe('Login', function () {
       const emptyToken = loginFixture({prompt: prompt({accessToken: async () => ''})})
       await expect(emptyToken.login.login({method: 'sso'})).to.be.rejectedWith('Access token is required')
       const emptyAccount = loginFixture()
-      emptyAccount.http.responses.push(response({email: ''}))
+      emptyAccount.api.responses.push(response({email: ''}))
       await expect(emptyAccount.login.login({method: 'sso'})).to.be.rejectedWith('Login response did not include an account email')
     })
 
     it('redacts the SSO access token and Bearer form from transport diagnostics', async function () {
       const token = 'sso-token'
-      const {http, login} = loginFixture()
-      http.responses.push(new Error(`proxy exposed ${token} Bearer ${token}`))
+      const {api, login} = loginFixture()
+      api.responses.push(new Error(`proxy exposed ${token} Bearer ${token}`))
       const error = await login.login({method: 'sso'}).then(() => {
         throw new Error('Expected failure')
       }, error => error as Error)
@@ -962,8 +1136,8 @@ describe('Login', function () {
     it('persists API and Git hosts before returning and writes native login state', async function () {
       const saveAuth = sinon.stub().resolves()
       const writeLoginState = sinon.stub().resolves()
-      const {http, login} = loginFixture({storage: storage({hasNativeStorage: () => true, saveAuth, writeLoginState})})
-      queueInteractive(http, 'saved@example.com', 'saved-token')
+      const {fetch, login} = loginFixture({storage: storage({hasNativeStorage: () => true, saveAuth, writeLoginState})})
+      queueInteractive(fetch, 'saved@example.com', 'saved-token')
       expect(await login.login({method: 'interactive'})).to.deep.equal({account: 'saved@example.com', token: 'saved-token'})
       expect(saveAuth.calledOnceWith('saved@example.com', 'saved-token', ['api.heroku.test', 'git.heroku.test'])).to.be.true
       expect(writeLoginState.calledOnceWith('/fixture/data', 'saved@example.com')).to.be.true
@@ -989,17 +1163,17 @@ describe('Login', function () {
         const writeLoginState = sinon.stub().resolves()
         if (failingOperation === 'saveAuth') saveAuth.rejects(adapterError)
         else writeLoginState.rejects(adapterError)
-        const {http, login} = loginFixture({
+        const {fetch, login} = loginFixture({
           storage: storage({hasNativeStorage: () => true, saveAuth, writeLoginState}),
         })
-        queueInteractive(http, account, token)
+        queueInteractive(fetch, account, token)
 
         const error = await login.login({method: 'interactive'}).then(() => {
           throw new Error('Expected failure')
         }, error => error as Error)
         expect(error).to.not.equal(adapterError)
         expect(error).to.not.be.instanceOf(AggregateError)
-        expect(error).to.not.be.instanceOf(LoginHttpError)
+        expect(error).to.not.be.instanceOf(LoginRequestError)
         expect(error.message).to.equal(`${failingOperation} failed for [SCRUBBED] [SCRUBBED] [SCRUBBED]`)
         expect(error.cause).to.equal(undefined)
         expect(error).to.not.have.any.keys('body', 'errors', 'request', 'response')
@@ -1009,21 +1183,21 @@ describe('Login', function () {
     })
 
     it('treats storage-thrown HTTP errors as storage diagnostics', async function () {
-      const account = 'storage-http@example.com'
-      const token = 'storage-http-token'
-      const adapterError = new LoginHttpError(500, {
+      const account = 'storage-fetch@example.com'
+      const token = 'storage-fetch-token'
+      const adapterError = new LoginRequestError(500, {
         id: 'storage_error',
         message: `Could not save ${account}`,
         resource: token,
       })
-      const {http, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(adapterError)})})
-      queueInteractive(http, account, token)
+      const {fetch, login} = loginFixture({storage: storage({saveAuth: sinon.stub().rejects(adapterError)})})
+      queueInteractive(fetch, account, token)
 
       const error = await login.login({method: 'interactive'}).then(() => {
         throw new Error('Expected failure')
       }, error => error as Error)
       expect(error).to.not.equal(adapterError)
-      expect(error).to.not.be.instanceOf(LoginHttpError)
+      expect(error).to.not.be.instanceOf(LoginRequestError)
       expect(error.message).to.equal('Could not save [SCRUBBED]\nError ID: storage_error')
       expect(error).to.not.have.any.keys('body', 'id', 'status')
       expectSafeErrorSurface(error, [account, token])
@@ -1031,35 +1205,60 @@ describe('Login', function () {
 
     it('does not write login state without native storage and never revokes the previous login', async function () {
       const writeLoginState = sinon.stub().resolves()
-      const {http, login} = loginFixture({storage: storage({hasNativeStorage: () => false, writeLoginState})})
-      queueInteractive(http)
+      const {api, fetch, login} = loginFixture({storage: storage({hasNativeStorage: () => false, writeLoginState})})
+      queueInteractive(fetch)
       await login.login({method: 'interactive'})
       expect(writeLoginState.notCalled).to.be.true
-      expect(http.requests.some(request => request.options.method === 'DELETE')).to.be.false
+      expect(api.requests.some(request => request.method === 'DELETE')).to.be.false
     })
   })
 
   describe('timeout and progress', function () {
-    it('passes request timeout and one operation signal to every login request and aborts it on timeout', async function () {
+    it('passes request timeouts and aborts every in-flight login fetch when the operation times out', async function () {
       const timers = fakeTimers()
-      const fixture = loginFixture({config: {requestTimeoutMs: 321}, timers})
-      fixture.http.responses.push(response({browser_url: '/browser', cli_url: '/cli', token: 'temporary-token'}))
-      const operation = fixture.login.login({method: 'browser'})
-      while (fixture.http.requests.length < 2) await Promise.resolve()
-      const signals = fixture.http.requests.map(request => request.options.signal)
-      expect(fixture.http.requests.every(request => request.options.timeoutMs === 321)).to.be.true
-      expect(signals[0]).to.equal(signals[1])
-      expect(signals[0]?.aborted).to.be.false
+      const fetches: Array<{settled: boolean, signal: AbortSignal, url: string}> = []
+      const fetch: FetchLike = async (input, init) => {
+        const signal = init?.signal
+        if (!signal) throw new Error('Expected a request signal')
+        const request = {settled: false, signal, url: input.toString()}
+        fetches.push(request)
+        if (fetches.length === 1) {
+          request.settled = true
+          return new Response(JSON.stringify({
+            browser_url: '/browser',
+            cli_url: '/cli',
+            token: 'temporary-token',
+          }), {status: 200})
+        }
+
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            request.settled = true
+            reject(signal.reason)
+          }, {once: true})
+        })
+      }
+
+      const operation = loginFixture({config: {requestTimeoutMs: 321}, fetch, timers}).login.login({method: 'browser'})
+      while (fetches.length < 2) await Promise.resolve()
+      expect(fetches.map(request => request.url)).to.deep.equal([
+        'https://cli-auth.heroku.com/auth',
+        'https://cli-auth.heroku.com/cli',
+      ])
+      const pendingFetches = fetches.filter(request => !request.settled)
+      expect(pendingFetches).to.have.length(1)
+      expect(pendingFetches.every(request => !request.signal.aborted)).to.be.true
       timers.fire()
       await expect(operation).to.be.rejectedWith('Login timed out')
-      expect(signals[0]?.aborted).to.be.true
+      expect(pendingFetches.every(request => request.signal.aborted)).to.be.true
+      expect(pendingFetches.map(request => request.signal.reason?.message)).to.deep.equal(['Login timed out'])
     })
 
     it('predictably rejects the active operation and clears timer/progress', async function () {
       const timers = fakeTimers()
       const loginProgress = progress()
-      const http: LoginHttp = {request: async () => new Promise(() => {})}
-      const login = loginFixture({http, progress: loginProgress, timers}).login.login({method: 'browser'})
+      const hangingFetch: FetchLike = async () => new Promise(() => {})
+      const login = loginFixture({fetch: hangingFetch, progress: loginProgress, timers}).login.login({method: 'browser'})
       await Promise.resolve()
       timers.fire()
       await expect(login).to.be.rejectedWith('Login timed out')
@@ -1074,7 +1273,7 @@ describe('Login', function () {
         resolveSave = resolve
       }))
       const fixture = loginFixture({storage: storage({saveAuth}), timers})
-      queueInteractive(fixture.http)
+      queueInteractive(fixture.fetch)
       const operation = fixture.login.login({method: 'interactive'})
       while (saveAuth.notCalled) await Promise.resolve()
       timers.fire()
@@ -1098,7 +1297,7 @@ describe('Login', function () {
       }))
       const writeLoginState = sinon.stub().resolves()
       const fixture = loginFixture({storage: storage({hasNativeStorage: () => true, saveAuth, writeLoginState}), timers})
-      queueInteractive(fixture.http)
+      queueInteractive(fixture.fetch)
       const operation = fixture.login.login({method: 'interactive'})
       while (saveAuth.notCalled) await Promise.resolve()
       timers.fire()
@@ -1111,8 +1310,8 @@ describe('Login', function () {
     it('prevents persistence when timeout wins during acquisition', async function () {
       const timers = fakeTimers()
       const saveAuth = sinon.stub().resolves()
-      const http: LoginHttp = {request: async () => new Promise(() => {})}
-      const operation = loginFixture({http, storage: storage({saveAuth}), timers}).login.login({method: 'browser'})
+      const hangingFetch: FetchLike = async () => new Promise(() => {})
+      const operation = loginFixture({fetch: hangingFetch, storage: storage({saveAuth}), timers}).login.login({method: 'browser'})
       await Promise.resolve()
       timers.fire()
       await expect(operation).to.be.rejectedWith('Login timed out')
@@ -1121,7 +1320,7 @@ describe('Login', function () {
 
     it('stops progress and clears timeout on ordinary failures', async function () {
       const fixture = loginFixture()
-      fixture.http.responses.push(response({message: 'failed'}, 400))
+      fixture.fetch.responses.push(response({message: 'failed'}, 400))
       await expect(fixture.login.login({method: 'browser'})).to.be.rejectedWith('failed')
       expect((fixture.timers as ReturnType<typeof fakeTimers>).cleared).to.equal(1)
       expect((fixture.progress as ReturnType<typeof progress>).stops).to.equal(1)
@@ -1132,9 +1331,9 @@ describe('Login', function () {
 describe('Login logout', function () {
   const entry = {account: 'test@example.com', token: 'prefixABCDEFGHIJKLMNOPQRSTUVWXYZsuffix'}
 
-  function logoutFixture(responses: Array<Error | LoginHttpResponse<unknown>>, storageOverrides: Partial<LoginStorage> = {}) {
+  function logoutFixture(responses: Array<Error | HerokuApiResponse<unknown>>, storageOverrides: Partial<LoginStorage> = {}) {
     const fixture = loginFixture({storage: storage(storageOverrides)})
-    fixture.http.responses.push(...responses)
+    fixture.api.responses.push(...responses)
     return fixture
   }
 
@@ -1153,7 +1352,7 @@ describe('Login logout', function () {
       expect(readLoginState.notCalled).to.be.true
       expect(removeAuth.notCalled).to.be.true
       expect(deleteLoginState.notCalled).to.be.true
-      expect(fixture.http.requests).to.deep.equal([])
+      expect(fixture.api.requests).to.deep.equal([])
     }
   })
 
@@ -1169,40 +1368,79 @@ describe('Login logout', function () {
   it('runs session and authorization-list requests in parallel with one explicit token and operation signal', async function () {
     const fixture = logoutFixture([response({}), response([], 401)])
     await fixture.login.logout(entry)
-    expect(fixture.http.requests.map(request => request.url)).to.have.members([
-      'https://api.heroku.test/oauth/sessions/~',
-      'https://api.heroku.test/oauth/authorizations',
+    expect(fixture.api.requests.map(request => request.path)).to.have.members([
+      '/oauth/sessions/~',
+      '/oauth/authorizations',
     ])
-    for (const request of fixture.http.requests) expect(request.options.headers?.authorization).to.equal(`Bearer ${entry.token}`)
-    expect(fixture.http.requests[0].options.signal).to.equal(fixture.http.requests[1].options.signal)
+    expect(fixture.api.requests[0].options?.signal).to.equal(fixture.api.requests[1].options?.signal)
+  })
+
+  it('uses operation token B rather than ambient token A for logout get and delete requests', async function () {
+    const operationTokenB = 'operation-token-b'
+    const {adapter, apiClientForToken, operationApi} = consumerApiAdapter(operationTokenB)
+    operationApi.responses.push(response({}), response([], 401))
+    const fixture = loginFixture({apiClientForToken})
+
+    await fixture.login.logout({account: entry.account, token: operationTokenB})
+    expect(apiClientForToken.calledOnceWith(operationTokenB)).to.be.true
+    expect(adapter.createApiClient.calledOnceWith({token: operationTokenB})).to.be.true
+    expect(operationApi.requests.map(request => [request.method, request.path])).to.have.deep.members([
+      ['DELETE', '/oauth/sessions/~'],
+      ['GET', '/oauth/authorizations'],
+    ])
+    expect(adapter.api.requests).to.deep.equal([])
+    expect(fixture.fetch.requests).to.deep.equal([])
+  })
+
+  it('sanitizes logout API client factory errors containing operation token variants', async function () {
+    const operationToken = 'logout-factory-token'
+    const apiClientForToken = sinon.stub().callsFake(() => {
+      throw tokenBearingFactoryError(operationToken)
+    })
+    const fixture = loginFixture({apiClientForToken})
+
+    const error = await fixture.login.logout({account: entry.account, token: operationToken}).then(() => {
+      throw new Error('Expected failure')
+    }, error => error as Error)
+    expect(error.message).to.equal('factory exposed [SCRUBBED] [SCRUBBED] [SCRUBBED]')
+    expectSafeErrorSurface(error, [operationToken, `Bearer ${operationToken}`])
   })
 
   it('passes request timeout to logout requests and aborts their operation signal on timeout', async function () {
     const timers = fakeTimers()
-    const requests: Request[] = []
-    const http: LoginHttp = {
-      async request(url, options) {
-        requests.push({options, url})
-        return new Promise(() => {})
-      },
+    const requests: ApiRequest[] = []
+    const api = new FakeApiClient()
+    api.delete = async (path, options) => {
+      requests.push({method: 'DELETE', options, path})
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), {once: true})
+      })
     }
-    const fixture = loginFixture({config: {requestTimeoutMs: 654}, http, timers})
+
+    api.get = async (path, options) => {
+      requests.push({method: 'GET', options, path})
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), {once: true})
+      })
+    }
+
+    const fixture = loginFixture({apiClientForToken: () => api, config: {requestTimeoutMs: 654}, timers})
     const operation = fixture.login.logout(entry)
     await Promise.resolve()
     expect(requests).to.have.length(2)
-    expect(requests.every(request => request.options.timeoutMs === 654)).to.be.true
-    expect(requests[0].options.signal).to.equal(requests[1].options.signal)
+    expect(requests.every(request => request.options?.timeoutMs === 654)).to.be.true
+    expect(requests[0].options?.signal).to.equal(requests[1].options?.signal)
     timers.fire()
     await expect(operation).to.be.rejectedWith('Logout timed out')
-    expect(requests[0].options.signal?.aborted).to.be.true
-    expect(requests[1].options.signal?.aborted).to.be.true
+    expect(requests.every(request => request.options?.signal?.aborted)).to.be.true
+    expect(requests.map(request => request.options?.signal?.reason?.message)).to.deep.equal(['Logout timed out', 'Logout timed out'])
   })
 
   it('accepts exact session errors and treats list-page 401 as an already-unauthorized no-op', async function () {
     for (const sessionResponse of [response({id: 'not_found', resource: 'session'}, 404), response({}, 401)]) {
       const fixture = logoutFixture([sessionResponse, response([], 401)])
       await fixture.login.logout(entry)
-      expect(fixture.http.requests).to.have.length(2)
+      expect(fixture.api.requests).to.have.length(2)
     }
   })
 
@@ -1212,7 +1450,7 @@ describe('Login logout', function () {
       [response({}), response({id: 'not_found', resource: 'authorization'}, 404)],
     ]) {
       const fixture = logoutFixture(responses)
-      await expect(fixture.login.logout(entry)).to.be.rejectedWith(LoginHttpError)
+      await expect(fixture.login.logout(entry)).to.be.rejectedWith(LoginRequestError)
     }
   })
 
@@ -1226,8 +1464,8 @@ describe('Login logout', function () {
     const fixture = logoutFixture([injected, response([], 401)])
     const error = await fixture.login.logout(entry).then(() => {
       throw new Error('Expected failure')
-    }, error => error as LoginHttpError)
-    expect(error).to.be.instanceOf(LoginHttpError)
+    }, error => error as LoginRequestError)
+    expect(error).to.be.instanceOf(LoginRequestError)
     expect(error.message).to.equal('Safe public message\nError ID: server_error')
     expect(error.body).to.deep.equal({id: 'server_error', message: 'Safe public message', resource: 'session'})
     expect(Object.keys(error.body ?? {})).to.have.members(['id', 'message', 'resource'])
@@ -1254,19 +1492,19 @@ describe('Login logout', function () {
       response({}),
     ])
     await fixture.login.logout(entry)
-    expect(fixture.http.requests[2].options.headers?.Range).to.equal('id ..; weird="value"')
-    expect(fixture.http.requests.filter(request => request.url.includes('/oauth/authorizations/') && request.options.method === 'DELETE').map(request => request.url)).to.have.members([
-      'https://api.heroku.test/oauth/authorizations/first',
-      'https://api.heroku.test/oauth/authorizations/second',
+    expect(fixture.api.requests[2].options?.headers?.Range).to.equal('id ..; weird="value"')
+    expect(fixture.api.requests.filter(request => request.path.includes('/oauth/authorizations/') && request.method === 'DELETE').map(request => request.path)).to.have.members([
+      '/oauth/authorizations/first',
+      '/oauth/authorizations/second',
     ])
   })
 
   it('fully accumulates and validates pages before deleting an authorization', async function () {
-    let resolveSecondPage = (_response: LoginHttpResponse<unknown>) => {}
-    const secondPage = new Promise<LoginHttpResponse<unknown>>(resolve => {
+    let resolveSecondPage = (_response: HerokuApiResponse<unknown>) => {}
+    const secondPage = new Promise<HerokuApiResponse<unknown>>(resolve => {
       resolveSecondPage = resolve
     })
-    const requests: Request[] = []
+    const requests: ApiRequest[] = []
     const responses = [
       Promise.resolve(response({})),
       Promise.resolve(response([{access_token: {token: entry.token}, id: 'first'}], 206, {'Next-Range': 'next'})),
@@ -1274,19 +1512,21 @@ describe('Login logout', function () {
       Promise.resolve(response({access_token: {token: 'default'}})),
       Promise.resolve(response({})),
     ]
-    const http: LoginHttp = {
-      async request<T>(url: string, options: LoginHttpRequest): Promise<LoginHttpResponse<T>> {
-        requests.push({options, url})
-        return await responses.shift() as LoginHttpResponse<T>
-      },
+    const api = new FakeApiClient()
+    const request = async <T>(method: ApiRequest['method'], path: string, options?: HerokuApiRequestOptions): Promise<HerokuApiResponse<T>> => {
+      requests.push({method, options, path})
+      return await responses.shift() as HerokuApiResponse<T>
     }
-    const fixture = loginFixture({http})
+
+    api.delete = async <T>(path: string, options?: HerokuApiRequestOptions) => request<T>('DELETE', path, options)
+    api.get = async <T>(path: string, options?: HerokuApiRequestOptions) => request<T>('GET', path, options)
+    const fixture = loginFixture({apiClientForToken: () => api})
     const operation = fixture.login.logout(entry)
     while (requests.length < 3) await Promise.resolve()
-    expect(requests.some(request => request.url.endsWith('/first') && request.options.method === 'DELETE')).to.be.false
+    expect(requests.some(request => request.path.endsWith('/first') && request.method === 'DELETE')).to.be.false
     resolveSecondPage(response({not: 'a list'}))
     await expect(operation).to.be.rejectedWith('authorization list')
-    expect(requests.some(request => request.url.endsWith('/first') && request.options.method === 'DELETE')).to.be.false
+    expect(requests.some(request => request.path.endsWith('/first') && request.method === 'DELETE')).to.be.false
   })
 
   it('rejects incomplete authorization enumeration when a later page returns 401 without deleting an authorization', async function () {
@@ -1301,7 +1541,7 @@ describe('Login logout', function () {
     await expect(fixture.login.logout(entry)).to.be.rejectedWith('Remote authorization revocation may be incomplete because the authorization list could not be fully enumerated')
     expect(removeAuth.calledOnce).to.be.true
     expect(deleteLoginState.calledOnce).to.be.true
-    expect(fixture.http.requests.some(request => request.url.includes('/oauth/authorizations/') && request.options.method === 'DELETE')).to.be.false
+    expect(fixture.api.requests.some(request => request.path.includes('/oauth/authorizations/') && request.method === 'DELETE')).to.be.false
   })
 
   it('rejects unsafe authorization pagination before deletion', async function () {
@@ -1313,7 +1553,7 @@ describe('Login logout', function () {
     for (const pages of scenarios) {
       const fixture = logoutFixture([response({}), ...pages])
       await expect(fixture.login.logout(entry)).to.be.rejectedWith('authorization pagination')
-      expect(fixture.http.requests.some(request => request.url.includes('/oauth/authorizations/') && request.options.method === 'DELETE')).to.be.false
+      expect(fixture.api.requests.some(request => request.path.includes('/oauth/authorizations/') && request.method === 'DELETE')).to.be.false
     }
   })
 
@@ -1321,7 +1561,7 @@ describe('Login logout', function () {
     const pages = Array.from({length: 500}, (_, index) => response([], 206, {'Next-Range': `page-${index + 1}`}))
     const fixture = logoutFixture([response({}), ...pages])
     await expect(fixture.login.logout(entry)).to.be.rejectedWith('exceeded 500 pages')
-    expect(fixture.http.requests.some(request => request.url.includes('/oauth/authorizations/') && request.options.method === 'DELETE')).to.be.false
+    expect(fixture.api.requests.some(request => request.path.includes('/oauth/authorizations/') && request.method === 'DELETE')).to.be.false
   })
 
   it('protects a matching default authorization and accepts only its exact expected 404', async function () {
@@ -1334,7 +1574,7 @@ describe('Login logout', function () {
       if (defaultResponse.status === 404) responses.push(response({}))
       const fixture = logoutFixture(responses)
       await fixture.login.logout(entry)
-      expect(fixture.http.requests.some(request => request.url.endsWith('/matching'))).to.equal(defaultResponse.status === 404)
+      expect(fixture.api.requests.some(request => request.path.endsWith('/matching'))).to.equal(defaultResponse.status === 404)
     }
   })
 
@@ -1347,8 +1587,8 @@ describe('Login logout', function () {
       const fixture = logoutFixture([
         response({}), response([{access_token: {token: entry.token}, id: 'matching'}]), response(body, 404),
       ])
-      await expect(fixture.login.logout(entry)).to.be.rejectedWith(LoginHttpError)
-      expect(fixture.http.requests.some(request => request.url.endsWith('/matching'))).to.be.false
+      await expect(fixture.login.logout(entry)).to.be.rejectedWith(LoginRequestError)
+      expect(fixture.api.requests.some(request => request.path.endsWith('/matching'))).to.be.false
     }
   })
 
@@ -1361,7 +1601,7 @@ describe('Login logout', function () {
     await expect(fixture.login.logout(entry)).to.be.rejectedWith('Remote authorization revocation may be incomplete')
     expect(removeAuth.calledOnce).to.be.true
     expect(deleteLoginState.calledOnce).to.be.true
-    expect(fixture.http.requests.some(request => request.url.endsWith('/matching'))).to.be.false
+    expect(fixture.api.requests.some(request => request.path.endsWith('/matching'))).to.be.false
   })
 
   it('rejects malformed successful default authorization responses before deletion', async function () {
@@ -1370,7 +1610,7 @@ describe('Login logout', function () {
         response({}), response([{access_token: {token: entry.token}, id: 'matching'}]), response(body),
       ])
       await expect(fixture.login.logout(entry)).to.be.rejectedWith('default authorization token')
-      expect(fixture.http.requests.some(request => request.url.endsWith('/matching'))).to.be.false
+      expect(fixture.api.requests.some(request => request.path.endsWith('/matching'))).to.be.false
     }
   })
 
@@ -1379,7 +1619,7 @@ describe('Login logout', function () {
       response({}), response([{access_token: {token: entry.token}, id: 'matching'}]), response({access_token: {token: '**********'}}),
     ])
     await fixture.login.logout(entry)
-    expect(fixture.http.requests.some(request => request.url.endsWith('/matching'))).to.be.false
+    expect(fixture.api.requests.some(request => request.path.endsWith('/matching'))).to.be.false
   })
 
   it('rejects invalid default token masks before authorization deletion', async function () {
@@ -1396,7 +1636,7 @@ describe('Login logout', function () {
         response({access_token: {token: defaultToken}}),
       ])
       await expect(fixture.login.logout(entry)).to.be.rejectedWith('default authorization token mask')
-      expect(fixture.http.requests.some(request => request.url.endsWith('/matching'))).to.be.false
+      expect(fixture.api.requests.some(request => request.path.endsWith('/matching'))).to.be.false
     }
   })
 
@@ -1414,9 +1654,9 @@ describe('Login logout', function () {
       response({}),
     ])
     await fixture.login.logout(entry)
-    expect(fixture.http.requests.filter(request => request.url.includes('/oauth/authorizations/') && request.options.method === 'DELETE').map(request => request.url)).to.have.members([
-      'https://api.heroku.test/oauth/authorizations/exact-one',
-      'https://api.heroku.test/oauth/authorizations/exact-two',
+    expect(fixture.api.requests.filter(request => request.path.includes('/oauth/authorizations/') && request.method === 'DELETE').map(request => request.path)).to.have.members([
+      '/oauth/authorizations/exact-one',
+      '/oauth/authorizations/exact-two',
     ])
   })
 
@@ -1431,7 +1671,7 @@ describe('Login logout', function () {
       response({}),
     ])
     await fixture.login.logout(entry)
-    expect(fixture.http.requests.filter(request => request.url.endsWith('/exact'))).to.have.length(1)
+    expect(fixture.api.requests.filter(request => request.path.endsWith('/exact'))).to.have.length(1)
   })
 
   it('deletes one distinct redacted match and accepts DELETE 401 as already revoked', async function () {
@@ -1445,7 +1685,7 @@ describe('Login logout', function () {
       response({}, 401),
     ])
     await fixture.login.logout(entry)
-    expect(fixture.http.requests.filter(request => request.url.endsWith('/redacted'))).to.have.length(1)
+    expect(fixture.api.requests.filter(request => request.path.endsWith('/redacted'))).to.have.length(1)
   })
 
   it('deletes one unique prefix-only ten-asterisk redacted match', async function () {
@@ -1459,7 +1699,7 @@ describe('Login logout', function () {
       response({}),
     ])
     await fixture.login.logout(entry)
-    expect(fixture.http.requests.filter(request => request.url.endsWith('/prefix-only'))).to.have.length(1)
+    expect(fixture.api.requests.filter(request => request.path.endsWith('/prefix-only'))).to.have.length(1)
   })
 
   it('ignores redacted candidates whose local token cannot contain all ten hidden characters', async function () {
@@ -1475,7 +1715,7 @@ describe('Login logout', function () {
         response({access_token: {token: 'default'}}),
       ])
       await fixture.login.logout(shortEntry)
-      expect(fixture.http.requests.some(request => request.url.endsWith('/short-match'))).to.be.false
+      expect(fixture.api.requests.some(request => request.path.endsWith('/short-match'))).to.be.false
     }
   })
 
@@ -1487,7 +1727,7 @@ describe('Login logout', function () {
       response({access_token: {token: 'prefix**********suffix'}}),
     ])
     await expect(fixture.login.logout(shortEntry)).to.be.rejectedWith('default authorization token mask')
-    expect(fixture.http.requests.some(request => request.url.endsWith('/matching'))).to.be.false
+    expect(fixture.api.requests.some(request => request.path.endsWith('/matching'))).to.be.false
   })
 
   it('retains non-401 authorization deletion errors', async function () {
@@ -1510,7 +1750,7 @@ describe('Login logout', function () {
       response({access_token: {token: 'default'}}),
     ])
     await expect(fixture.login.logout(entry)).to.be.rejectedWith('multiple redacted authorizations')
-    expect(fixture.http.requests.some(request => request.url.endsWith('/one') || request.url.endsWith('/two'))).to.be.false
+    expect(fixture.api.requests.some(request => request.path.endsWith('/one') || request.path.endsWith('/two'))).to.be.false
   })
 
   it('rejects multiple prefix-only or mixed inferred IDs before deletion', async function () {
@@ -1530,7 +1770,9 @@ describe('Login logout', function () {
         response({access_token: {token: 'default'}}),
       ])
       await expect(fixture.login.logout(entry)).to.be.rejectedWith('multiple redacted authorizations')
-      expect(fixture.http.requests.some(request => request.url.endsWith('/one') || request.url.endsWith('/two') || request.url.endsWith('/prefix-only') || request.url.endsWith('/prefix-and-suffix'))).to.be.false
+      expect(fixture.api.requests.some(request => [
+        '/one', '/two', '/prefix-only', '/prefix-and-suffix',
+      ].some(suffix => request.path.endsWith(suffix)))).to.be.false
     }
   })
 
@@ -1542,7 +1784,7 @@ describe('Login logout', function () {
         response({access_token: {token: 'default'}}),
       ])
       await expect(fixture.login.logout(entry)).to.be.rejectedWith('matching authorization ID')
-      expect(fixture.http.requests.some(request => request.url.endsWith('/valid'))).to.be.false
+      expect(fixture.api.requests.some(request => request.path.endsWith('/valid'))).to.be.false
     }
   })
 
@@ -1559,14 +1801,14 @@ describe('Login logout', function () {
       response({access_token: {token: 'default'}}),
     ])
     await fixture.login.logout(entry)
-    expect(fixture.http.requests.filter(request => request.url.includes('/oauth/authorizations/') && request.options.method === 'DELETE')).to.deep.equal([])
+    expect(fixture.api.requests.filter(request => request.path.includes('/oauth/authorizations/') && request.method === 'DELETE')).to.deep.equal([])
   })
 
   it('preserves custom API ports without adding a production Git cleanup host', async function () {
     for (const apiUrl of ['https://custom-api.example.test:8443', 'https://custom-api.example.test:443', 'http://localhost:4567', 'http://[::1]:4567']) {
       const removeAuth = sinon.stub().resolves()
       const fixture = loginFixture({config: {apiUrl}, storage: storage({removeAuth})})
-      fixture.http.responses.push(response({}), response([], 401))
+      fixture.api.responses.push(response({}), response([], 401))
       await fixture.login.logout(entry)
       const explicitPort = apiUrl.match(/:(\d+)$/)?.[1]
       const expectedHost = `${new URL(apiUrl).hostname}${explicitPort ? `:${explicitPort}` : ''}`
@@ -1581,9 +1823,9 @@ describe('Login logout', function () {
       config: {apiHost: 'same.heroku.test', apiUrl: 'https://same.heroku.test', gitHost: 'same.heroku.test'},
       storage: storage({removeAuth, saveAuth}),
     })
-    queueInteractive(fixture.http, entry.account, entry.token)
+    queueInteractive(fixture.fetch, entry.account, entry.token)
     await fixture.login.login({method: 'interactive'})
-    fixture.http.responses.push(response({}), response([], 401))
+    fixture.api.responses.push(response({}), response([], 401))
     await fixture.login.logout(entry)
     expect(saveAuth.calledOnceWith(entry.account, entry.token, ['same.heroku.test'])).to.be.true
     expect(removeAuth.calledOnceWith(entry.account, ['same.heroku.test'])).to.be.true
@@ -1598,7 +1840,7 @@ describe('Login logout', function () {
       },
       storage: storage({removeAuth}),
     })
-    fixture.http.responses.push(response({}), response([], 401))
+    fixture.api.responses.push(response({}), response([], 401))
     await fixture.login.logout(entry)
     expect(removeAuth.calledOnceWith(
       entry.account,
@@ -1617,7 +1859,7 @@ describe('Login logout', function () {
       },
       storage: storage({deleteLoginState}),
     })
-    fixture.http.responses.push(response({}), response([], 401))
+    fixture.api.responses.push(response({}), response([], 401))
     await fixture.login.logout(entry)
     expect(deleteLoginState.notCalled).to.be.true
   })
@@ -1626,8 +1868,10 @@ describe('Login logout', function () {
     const timers = fakeTimers()
     const removeAuth = sinon.stub().resolves()
     const deleteLoginState = sinon.stub().resolves()
-    const http: LoginHttp = {request: async () => new Promise(() => {})}
-    const fixture = loginFixture({http, storage: storage({deleteLoginState, removeAuth}), timers})
+    const api = new FakeApiClient()
+    api.delete = async () => new Promise(() => {})
+    api.get = async () => new Promise(() => {})
+    const fixture = loginFixture({apiClientForToken: () => api, storage: storage({deleteLoginState, removeAuth}), timers})
     const operation = fixture.login.logout(entry)
     expect(removeAuth.calledOnce).to.be.true
     expect(deleteLoginState.calledOnce).to.be.true
@@ -1639,18 +1883,23 @@ describe('Login logout', function () {
 
   it('aborts hanging remote cleanup at timeout but waits for already-started local cleanup', async function () {
     const timers = fakeTimers()
-    const requests: Request[] = []
+    const requests: ApiRequest[] = []
     let resolveLocalCleanup = () => {}
     const removeAuth = sinon.stub().returns(new Promise<void>(resolve => {
       resolveLocalCleanup = resolve
     }))
-    const http: LoginHttp = {
-      async request(url, options) {
-        requests.push({options, url})
-        return new Promise(() => {})
-      },
+    const api = new FakeApiClient()
+    api.delete = async (path, options) => {
+      requests.push({method: 'DELETE', options, path})
+      return new Promise(() => {})
     }
-    const fixture = loginFixture({http, storage: storage({removeAuth}), timers})
+
+    api.get = async (path, options) => {
+      requests.push({method: 'GET', options, path})
+      return new Promise(() => {})
+    }
+
+    const fixture = loginFixture({apiClientForToken: () => api, storage: storage({removeAuth}), timers})
     const operation = fixture.login.logout(entry)
     while (requests.length < 2) await Promise.resolve()
 
@@ -1663,7 +1912,7 @@ describe('Login logout', function () {
       setImmediate(resolve)
     })
 
-    expect(requests.every(request => request.options.signal?.aborted)).to.be.true
+    expect(requests.every(request => request.options?.signal?.aborted)).to.be.true
     expect(settled).to.be.false
     resolveLocalCleanup()
     await expect(operation).to.be.rejectedWith('Logout timed out')
@@ -1675,8 +1924,10 @@ describe('Login logout', function () {
     const removeAuth = sinon.stub().returns(new Promise<void>((_resolve, reject) => {
       rejectLocalCleanup = reject
     }))
-    const http: LoginHttp = {request: async () => new Promise(() => {})}
-    const operation = loginFixture({http, storage: storage({removeAuth}), timers}).login.logout(entry)
+    const api = new FakeApiClient()
+    api.delete = async () => new Promise(() => {})
+    api.get = async () => new Promise(() => {})
+    const operation = loginFixture({apiClientForToken: () => api, storage: storage({removeAuth}), timers}).login.logout(entry)
     await Promise.resolve()
     timers.fire()
     rejectLocalCleanup(new Error('local failed'))
@@ -1735,7 +1986,7 @@ describe('Login logout', function () {
       }, error => error as Error)
       expect(error).to.not.equal(adapterError)
       expect(error).to.not.be.instanceOf(AggregateError)
-      expect(error).to.not.be.instanceOf(LoginHttpError)
+      expect(error).to.not.be.instanceOf(LoginRequestError)
       expect(error.message).to.equal(`${failingOperation} failed for [SCRUBBED] [SCRUBBED] [SCRUBBED]`)
       expect(error.cause).to.equal(undefined)
       expect(error).to.not.have.any.keys('body', 'errors', 'request', 'response')
@@ -1746,4 +1997,4 @@ describe('Login logout', function () {
   })
 })
 
-/* eslint-enable camelcase, mocha/max-top-level-suites, no-await-in-loop, unicorn/consistent-function-scoping */
+/* eslint-enable camelcase, max-lines, mocha/max-top-level-suites, no-await-in-loop, unicorn/consistent-function-scoping */

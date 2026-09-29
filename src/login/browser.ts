@@ -3,14 +3,13 @@ import type {
 } from './types.js'
 
 import {
-  checkedRequest, LoginHttpError, normalizeLoginHttpError, sanitizePublicError,
+  fetchGet, fetchJsonPost, LoginRequestError, normalizeLoginRequestError, sanitizePublicError,
 } from './http.js'
 import {
   type RequestContext, requestOptions, validateAccount,
 } from './oauth.js'
 
 type BrowserOptions = {
-  apiUrl: string
   browser?: LoginBrowser
   browserName?: string
   environment: LoginEnvironment
@@ -49,12 +48,12 @@ async function pollForAuth(
     try {
       // Sequential retry is required by the CLI auth service contract.
       // eslint-disable-next-line no-await-in-loop
-      return (await checkedRequest<{access_token?: unknown, error?: unknown}>(context.http, url, requestOptions(context, 'GET', {
+      return (await fetchGet<{access_token?: unknown, error?: unknown}>(context.fetch, url, requestOptions(context, {
         headers: {authorization: `Bearer ${temporaryToken}`},
       }), [temporaryToken, `Bearer ${temporaryToken}`])).body
     } catch (error) {
-      const normalized = normalizeLoginHttpError(error)
-      if (normalized instanceof LoginHttpError && normalized.status > 500 && attempt < 3) continue
+      const normalized = normalizeLoginRequestError(error)
+      if (normalized instanceof LoginRequestError && normalized.status > 500 && attempt < 3) continue
       throw normalized
     }
   }
@@ -64,12 +63,11 @@ export async function browserLogin(
   context: RequestContext,
   options: BrowserOptions,
 ): Promise<{account: string, token: string}> {
-  const {body} = await checkedRequest<{browser_url?: unknown, cli_url?: unknown, token?: unknown}>(
-    context.http,
+  const {body} = await fetchJsonPost<{browser_url?: unknown, cli_url?: unknown, token?: unknown}>(
+    context.fetch,
     `${options.loginHost}/auth`,
-    requestOptions(context, 'POST', {
-      body: {description: `Heroku CLI login from ${options.hostname}`},
-    }),
+    {description: `Heroku CLI login from ${options.hostname}`},
+    requestOptions(context),
   )
   const browserUrl = loginUrl(body?.browser_url, 'a browser URL', options.loginHost)
   const cliUrl = loginUrl(body?.cli_url, 'a CLI URL', options.loginHost)
@@ -106,7 +104,7 @@ export async function browserLogin(
 
   const token = requiredString(auth?.access_token, 'an access token')
   options.progress.start('Logging in')
-  const account = await validateAccount(context, options.apiUrl, token)
+  const account = await validateAccount(context, token)
 
   return {account, token}
 }

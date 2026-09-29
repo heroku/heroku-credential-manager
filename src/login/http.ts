@@ -1,6 +1,8 @@
 import {createRequire} from 'node:module'
 
-import type {LoginHttp, LoginHttpRequest, LoginHttpResponse} from './types.js'
+import type {
+  FetchLike, HerokuApiClientLike, HerokuApiRequestOptions, HerokuApiResponse,
+} from './types.js'
 
 const require = createRequire(import.meta.url)
 const packageMetadata = require('../../package.json') as {name: string, version: string}
@@ -13,9 +15,9 @@ type ErrorBody = {
 }
 
 type SanitizationOptions = {
-  normalizeHttpError?: boolean
+  normalizeRequestError?: boolean
   preserveCause?: boolean
-  preserveHttpDetails?: boolean
+  preserveRequestDetails?: boolean
 }
 
 type ProjectionContext = {
@@ -27,7 +29,7 @@ type ProjectionContext = {
 const MAX_CAUSE_DEPTH = 8
 const SCRUBBED = '[SCRUBBED]'
 
-export type LoginHttpErrorBody = {
+export type LoginRequestErrorBody = {
   id?: string
   message?: string
   resource?: string
@@ -47,18 +49,20 @@ function scrubSensitiveText(text: string, variants: readonly string[]): string {
   return scrubbed
 }
 
-function publicBody(body: unknown, variants: readonly string[] = []): LoginHttpErrorBody | undefined {
+function fieldFrom(body: ErrorBody, field: keyof ErrorBody): unknown {
+  try {
+    return body[field]
+  } catch {
+    return undefined
+  }
+}
+
+function publicBody(body: unknown, variants: readonly string[] = []): LoginRequestErrorBody | undefined {
   if (!body || typeof body !== 'object') return
   const candidate = body as ErrorBody
-  const result: LoginHttpErrorBody = {}
+  const result: LoginRequestErrorBody = {}
   for (const field of ['id', 'message', 'resource'] as const) {
-    let value: unknown
-    try {
-      value = candidate[field]
-    } catch {
-      continue
-    }
-
+    const value = fieldFrom(candidate, field)
     if (typeof value === 'string') result[field] = scrubSensitiveText(value, variants)
   }
 
@@ -67,7 +71,9 @@ function publicBody(body: unknown, variants: readonly string[] = []): LoginHttpE
 
 function bodyMessage(body: unknown): string | undefined {
   if (!body || typeof body !== 'object') return
-  const {id, message} = body as ErrorBody
+  const candidate = body as ErrorBody
+  const message = fieldFrom(candidate, 'message')
+  const id = fieldFrom(candidate, 'id')
   const usefulMessage = typeof message === 'string' && message.trim() ? message : undefined
   const usefulId = typeof id === 'string' && id.trim() ? id : undefined
 
@@ -77,14 +83,14 @@ function bodyMessage(body: unknown): string | undefined {
 }
 
 /**
- * Public error for an unsuccessful login HTTP response.
+ * Public error for an unsuccessful login request.
  *
  * Its body is limited to safe Heroku error fields (`id`, `message`, and `resource`),
  * and known credentials are scrubbed from both the body and message.
  */
-export class LoginHttpError extends Error {
+export class LoginRequestError extends Error {
   /** Sanitized response error fields, when provided by the server. */
-  body?: LoginHttpErrorBody
+  body?: LoginRequestErrorBody
   /** Heroku error identifier, when present. */
   id?: string
   /** HTTP response status code. */
@@ -97,29 +103,51 @@ export class LoginHttpError extends Error {
     super(safeMessage ?? bodyMessage(safeBody) ?? `Login request failed with status ${status}`)
     this.body = safeBody
     this.id = safeBody?.id
-    this.name = 'LoginHttpError'
+    this.name = 'LoginRequestError'
     this.status = status
   }
 }
 
-function statusFrom(error: Record<string, unknown>): number | undefined {
-  if (typeof error.status === 'number') return error.status
-  if (typeof error.statusCode === 'number') return error.statusCode
-
-  const {http} = error
-  if (http && typeof http === 'object' && typeof (http as {statusCode?: unknown}).statusCode === 'number') {
-    return (http as {statusCode: number}).statusCode
+function numericProperty(record: Record<string, unknown>, property: string): number | undefined {
+  try {
+    const value = record[property]
+    return typeof value === 'number' ? value : undefined
+  } catch {
+    return undefined
   }
 }
 
-function bodyFrom(error: Record<string, unknown>): unknown {
-  if ('body' in error) return error.body
-  const {http} = error
-  if (http && typeof http === 'object' && 'body' in http) return (http as {body?: unknown}).body
+function objectProperty(record: Record<string, unknown>, property: string): Record<string, unknown> | undefined {
+  try {
+    const value = record[property]
+    return value && typeof value === 'object' ? value as Record<string, unknown> : undefined
+  } catch {
+    return undefined
+  }
 }
 
-export function normalizeLoginHttpError(error: unknown): Error | LoginHttpError {
-  if (error instanceof LoginHttpError) return error
+function statusFrom(error: Record<string, unknown>): number | undefined {
+  const status = numericProperty(error, 'status') ?? numericProperty(error, 'statusCode')
+  if (status !== undefined) return status
+  const http = objectProperty(error, 'http')
+  return http ? numericProperty(http, 'statusCode') ?? numericProperty(http, 'status') : undefined
+}
+
+function bodyFrom(error: Record<string, unknown>): unknown {
+  try {
+    if ('body' in error) return error.body
+  } catch {}
+
+  const http = objectProperty(error, 'http')
+  if (!http) return
+  try {
+    if ('body' in http) return http.body
+  } catch {}
+}
+
+/** Converts common client error shapes to the package's stable request error. */
+export function normalizeLoginRequestError(error: unknown): Error | LoginRequestError {
+  if (error instanceof LoginRequestError) return error
   if (!error || typeof error !== 'object') return error instanceof Error ? error : new Error('Login request failed')
 
   const record = error as Record<string, unknown>
@@ -127,8 +155,7 @@ export function normalizeLoginHttpError(error: unknown): Error | LoginHttpError 
   if (status === undefined) return error instanceof Error ? error : new Error('Login request failed')
 
   const body = bodyFrom(record)
-  const message = bodyMessage(body)
-  return new LoginHttpError(status, body, message)
+  return new LoginRequestError(status, body, bodyMessage(body))
 }
 
 function errorString(error: Error, field: 'message' | 'name', fallback: string): string {
@@ -185,10 +212,10 @@ export function sanitizePublicError(
   options: SanitizationOptions = {},
 ): Error {
   try {
-    if (!(error instanceof Error)) return new Error('Login request failed')
-    const normalized = options.normalizeHttpError ? normalizeLoginHttpError(error) : error
-    if (normalized instanceof LoginHttpError && (options.preserveHttpDetails ?? true)) {
-      return new LoginHttpError(normalized.status, normalized.body, undefined, sensitiveValues)
+    const normalized = options.normalizeRequestError ? normalizeLoginRequestError(error) : error
+    if (!(normalized instanceof Error)) return new Error('Login request failed')
+    if (normalized instanceof LoginRequestError && (options.preserveRequestDetails ?? true)) {
+      return new LoginRequestError(normalized.status, normalized.body, undefined, sensitiveValues)
     }
 
     return safeErrorProjection(normalized, sensitiveVariants(sensitiveValues), {
@@ -201,19 +228,47 @@ export function sanitizePublicError(
   }
 }
 
-export async function checkedRequest<T>(
-  http: LoginHttp,
-  url: string,
-  options: LoginHttpRequest,
-  sensitiveValues: readonly string[] = [],
-): Promise<LoginHttpResponse<T>> {
-  try {
-    const response = await http.request<T>(url, options)
-    if (!response.ok) throw new LoginHttpError(response.status, response.body, undefined, sensitiveValues)
-    return response
-  } catch (error) {
-    throw sanitizePublicError(error, sensitiveValues, {normalizeHttpError: true})
+function successful(status: number): boolean {
+  return status >= 200 && status < 300
+}
+
+function checkedResponse<T>(response: HerokuApiResponse<T>, sensitiveValues: readonly string[]): HerokuApiResponse<T> {
+  if (!successful(response.status)) {
+    throw new LoginRequestError(response.status, response.body, undefined, sensitiveValues)
   }
+
+  return response
+}
+
+async function checkedHerokuApiRequest<T>(
+  request: () => Promise<HerokuApiResponse<T>>,
+  sensitiveValues: readonly string[] = [],
+): Promise<HerokuApiResponse<T>> {
+  try {
+    return checkedResponse(await request(), sensitiveValues)
+  } catch (error) {
+    throw sanitizePublicError(error, sensitiveValues, {normalizeRequestError: true})
+  }
+}
+
+/** Performs a checked GET through an injected Heroku Platform API client. */
+export async function herokuApiGet<T>(
+  api: HerokuApiClientLike,
+  path: string,
+  options?: HerokuApiRequestOptions,
+  sensitiveValues: readonly string[] = [],
+): Promise<HerokuApiResponse<T>> {
+  return checkedHerokuApiRequest(() => api.get<T>(path, options), sensitiveValues)
+}
+
+/** Performs a checked DELETE through an injected Heroku Platform API client. */
+export async function herokuApiDelete<T>(
+  api: HerokuApiClientLike,
+  path: string,
+  options?: HerokuApiRequestOptions,
+  sensitiveValues: readonly string[] = [],
+): Promise<HerokuApiResponse<T>> {
+  return checkedHerokuApiRequest(() => api.delete<T>(path, options), sensitiveValues)
 }
 
 async function responseBody(response: Response): Promise<unknown> {
@@ -227,50 +282,88 @@ async function responseBody(response: Response): Promise<unknown> {
   }
 }
 
-export class FetchLoginHttp implements LoginHttp {
-  async request<T>(url: string, options: LoginHttpRequest): Promise<LoginHttpResponse<T>> {
-    const controller = new AbortController()
-    const abort = () => controller.abort(options.signal?.reason)
-    let timedOut = false
-    if (options.signal?.aborted) abort()
-    else options.signal?.addEventListener('abort', abort, {once: true})
+function defaultFetch(): FetchLike {
+  return globalThis.fetch.bind(globalThis)
+}
 
-    const timer = options.timeoutMs === undefined
-      ? undefined
-      : setTimeout(() => {
-        timedOut = true
-        controller.abort(new Error('Login request timed out'))
-      }, options.timeoutMs)
-    timer?.unref()
+async function fetchResponse<T>(
+  fetchImplementation: FetchLike | undefined,
+  url: string,
+  init: RequestInit,
+  options: HerokuApiRequestOptions,
+  sensitiveValues: readonly string[],
+): Promise<HerokuApiResponse<T>> {
+  const controller = new AbortController()
+  const abort = () => controller.abort(options.signal?.reason)
+  let timedOut = false
+  if (options.signal?.aborted) abort()
+  else options.signal?.addEventListener('abort', abort, {once: true})
 
-    try {
-      const hasBody = options.body !== undefined
-      const hasUserAgent = Object.keys(options.headers ?? {}).some(header => header.toLowerCase() === 'user-agent')
-      const response = await fetch(url, {
-        body: hasBody ? JSON.stringify(options.body) : undefined,
-        headers: {
-          ...(hasBody ? {'content-type': 'application/json'} : {}),
-          ...(hasUserAgent ? {} : {'user-agent': USER_AGENT}),
-          ...options.headers,
-        },
-        method: options.method,
-        redirect: 'error',
-        signal: controller.signal,
-      })
+  const timer = options.timeoutMs === undefined
+    ? undefined
+    : setTimeout(() => {
+      timedOut = true
+      controller.abort(new Error('Login request timed out'))
+    }, options.timeoutMs)
+  timer?.unref()
 
-      return {
-        body: await responseBody(response) as T,
-        headers: Object.fromEntries(response.headers.entries()),
-        ok: response.ok,
-        status: response.status,
-      }
-    } catch (error) {
-      if (timedOut) throw new Error('Login request timed out')
-      if (options.signal?.aborted && options.signal.reason instanceof Error) throw options.signal.reason
-      throw error
-    } finally {
-      if (timer) clearTimeout(timer)
-      options.signal?.removeEventListener('abort', abort)
+  try {
+    const fetch = fetchImplementation ?? defaultFetch()
+    const response = await fetch(url, {
+      ...init,
+      redirect: 'error',
+      signal: controller.signal,
+    })
+    const result: HerokuApiResponse<T> = {
+      body: await responseBody(response) as T,
+      headers: Object.fromEntries(response.headers.entries()),
+      status: response.status,
     }
+
+    return checkedResponse(result, sensitiveValues)
+  } catch (error) {
+    if (timedOut) throw new Error('Login request timed out')
+    if (options.signal?.aborted && options.signal.reason instanceof Error) throw options.signal.reason
+    throw sanitizePublicError(error, sensitiveValues, {normalizeRequestError: true})
+  } finally {
+    if (timer) clearTimeout(timer)
+    options.signal?.removeEventListener('abort', abort)
   }
+}
+
+function requestHeaders(headers: Record<string, string> | undefined, hasBody: boolean): Record<string, string> {
+  const hasUserAgent = Object.keys(headers ?? {}).some(header => header.toLowerCase() === 'user-agent')
+  return {
+    ...(hasBody ? {'content-type': 'application/json'} : {}),
+    ...(hasUserAgent ? {} : {'user-agent': USER_AGENT}),
+    ...headers,
+  }
+}
+
+/** Performs a checked JSON POST using an injected fetch, or global fetch resolved at call time. */
+export async function fetchJsonPost<T>(
+  fetchImplementation: FetchLike | undefined,
+  url: string,
+  body: unknown,
+  options: HerokuApiRequestOptions = {},
+  sensitiveValues: readonly string[] = [],
+): Promise<HerokuApiResponse<T>> {
+  return fetchResponse(fetchImplementation, url, {
+    body: JSON.stringify(body),
+    headers: requestHeaders(options.headers, true),
+    method: 'POST',
+  }, options, sensitiveValues)
+}
+
+/** Performs a checked non-Platform GET using an injected fetch, or global fetch resolved at call time. */
+export async function fetchGet<T>(
+  fetchImplementation: FetchLike | undefined,
+  url: string,
+  options: HerokuApiRequestOptions = {},
+  sensitiveValues: readonly string[] = [],
+): Promise<HerokuApiResponse<T>> {
+  return fetchResponse(fetchImplementation, url, {
+    headers: requestHeaders(options.headers, false),
+    method: 'GET',
+  }, options, sensitiveValues)
 }

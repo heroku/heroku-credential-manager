@@ -1,5 +1,9 @@
 {
   "all": true,
+  "reporter": [
+    "text-summary",
+    "lcovonly"
+  ],
   "include": [
     "src/**/*.ts"
   ],

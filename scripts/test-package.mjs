@@ -12,6 +12,7 @@ const packDirectory = path.join(temporaryRoot, 'pack')
 const consumerDirectory = path.join(temporaryRoot, 'consumer')
 const loginTypesDirectory = path.join(temporaryRoot, 'login-types-consumer')
 const isolatedHome = path.join(temporaryRoot, 'home')
+const isolatedPath = path.join(temporaryRoot, 'path')
 const forbiddenDependencies = new Set([
   '@heroku-cli/command',
   '@heroku/heroku-cli-util',
@@ -165,6 +166,7 @@ try {
   fs.mkdirSync(consumerDirectory)
   fs.mkdirSync(loginTypesDirectory)
   fs.mkdirSync(isolatedHome)
+  fs.mkdirSync(isolatedPath)
 
   const packOutput = npm(
     packageRoot,
@@ -479,11 +481,14 @@ assert.deepEqual(storageCalls, [
 
 const temporaryRoot = ${JSON.stringify(temporaryRoot)}
 const expectedHome = ${JSON.stringify(isolatedHome)}
+const expectedPath = ${JSON.stringify(isolatedPath)}
 const netrcPath = path.join(expectedHome, process.platform === 'win32' ? '_netrc' : '.netrc')
 assert.equal(process.env.HOME, expectedHome)
 assert.equal(process.env.USERPROFILE, expectedHome)
 assert.equal(path.join(process.env.HOMEDRIVE, process.env.HOMEPATH), expectedHome)
+assert.equal(process.env.PATH, expectedPath)
 assert.equal(path.relative(temporaryRoot, netrcPath).startsWith('..'), false)
+assert.deepEqual(credentialManager.getStorageConfig(), {credentialStore: null, useNetrc: true})
 
 const host = 'package-fixture.heroku.com'
 const token = 'package-fixture-token'
@@ -494,14 +499,93 @@ assert.deepEqual(await credentialManager.getAuth(account, host), {account, token
 await credentialManager.removeAuth(account, [host])
 await assert.rejects(credentialManager.getAuth(account, host), /No auth found|No credentials found/)
 
+const w3Account = 'packed-login@example.com'
+const w3Token = 'packed-login-token'
+const w3PromptCalls = []
+const w3Prompt = {
+  async accessToken() { throw new Error('unexpected access-token prompt') },
+  async email(previousAccount) { w3PromptCalls.push({name: 'email', previousAccount}); return w3Account },
+  async loginMethod() { throw new Error('unexpected login-method prompt') },
+  async organization() { throw new Error('unexpected organization prompt') },
+  async password() { w3PromptCalls.push({name: 'password'}); return 'packed-password' },
+  async secondFactor() { throw new Error('unexpected second-factor prompt') },
+}
+const w3FetchCalls = []
+const w3Fetch = async (url, init) => {
+  w3FetchCalls.push({init, url: String(url)})
+  return new Response(JSON.stringify({
+    access_token: {token: w3Token},
+    user: {email: w3Account},
+  }), {
+    headers: {'content-type': 'application/json'},
+    status: 201,
+  })
+}
+const w3ApiCalls = []
+const w3ApiClient = {
+  async delete(path, options) {
+    w3ApiCalls.push({method: 'DELETE', options, path})
+    return {body: undefined, headers: {}, status: 204}
+  },
+  async get(path, options) {
+    w3ApiCalls.push({method: 'GET', options, path})
+    if (path === '/oauth/authorizations') {
+      return {
+        body: [{access_token: {token: w3Token}, id: 'packed-login-authorization'}],
+        headers: {},
+        status: 200,
+      }
+    }
+
+    if (path === '/oauth/authorizations/~') {
+      return {body: {access_token: {token: 'packed-default-token'}}, headers: {}, status: 200}
+    }
+
+    throw new Error(\`unexpected W3 Platform API GET \${path}\`)
+  },
+}
+const w3FactoryTokens = []
+const w3Login = new loginModule.Login({
+  apiClientForToken(token) { w3FactoryTokens.push(token); return w3ApiClient },
+  environment: {get() { return undefined }},
+  fetch: w3Fetch,
+  prompt: w3Prompt,
+})
+const w3Auth = await w3Login.login({method: 'interactive'})
+assert.deepEqual(w3Auth, {account: w3Account, token: w3Token})
+assert.deepEqual(w3PromptCalls, [{name: 'email', previousAccount: undefined}, {name: 'password'}])
+assert.equal(w3FetchCalls.length, 1)
+assert.equal(w3FetchCalls[0].url, 'https://api.heroku.com/oauth/authorizations')
+assert.equal(w3FetchCalls[0].init.method, 'POST')
+assert.equal(fs.existsSync(netrcPath), true)
+assert.deepEqual(await credentialManager.getAuth(undefined, 'api.heroku.com'), w3Auth)
+assert.deepEqual(await credentialManager.getAuth(w3Account, 'git.heroku.com'), w3Auth)
+
+await w3Login.logout(w3Auth)
+assert.deepEqual(w3FactoryTokens, [w3Token])
+assert.deepEqual(w3ApiCalls.map(({method, path}) => [method, path]), [
+  ['DELETE', '/oauth/sessions/~'],
+  ['GET', '/oauth/authorizations'],
+  ['GET', '/oauth/authorizations/~'],
+  ['DELETE', '/oauth/authorizations/packed-login-authorization'],
+])
+await assert.rejects(credentialManager.getAuth(undefined, 'api.heroku.com'), /No auth found|No credentials found/)
+await assert.rejects(credentialManager.getAuth(undefined, 'git.heroku.com'), /No auth found|No credentials found/)
+
 `)
+  const runtimeEnvironment = {
+    ...process.env,
+    HEROKU_NETRC_WRITE: 'true',
+    ...homeEnvironment(isolatedHome),
+  }
+  for (const key of Object.keys(runtimeEnvironment)) {
+    if (key.toLowerCase() === 'path') delete runtimeEnvironment[key]
+  }
+
+  runtimeEnvironment.PATH = isolatedPath
   execFileSync(process.execPath, ['runtime.mjs'], {
     cwd: consumerDirectory,
-    env: {
-      ...process.env,
-      HEROKU_NETRC_WRITE: 'true',
-      ...homeEnvironment(isolatedHome),
-    },
+    env: runtimeEnvironment,
     stdio: 'inherit',
   })
 

@@ -70,7 +70,7 @@ class FakeFetch {
   responses: Array<Error | HerokuApiResponse<unknown>> = []
 }
 
-function response<T>(body: T, status = 200, headers: Record<string, string> = {}): HerokuApiResponse<T> {
+function response<T>(body: T, status = 200, headers: HerokuApiResponse<T>['headers'] = {}): HerokuApiResponse<T> {
   return {body, headers, status}
 }
 
@@ -1497,6 +1497,23 @@ describe('Login logout', function () {
       '/oauth/authorizations/first',
       '/oauth/authorizations/second',
     ])
+  })
+
+  it('uses the first array-valued Next-Range verbatim when a proxy doubles a malformed value', async function () {
+    const proxyDoubledRange = 'id 2..; max=1000, id 2..; max=1000'
+    const fixture = logoutFixture([
+      response({}),
+      response([], 206, {'Next-Range': [proxyDoubledRange, 'id 999..; max=1000']}),
+      response([]),
+      response({access_token: {token: 'default'}}),
+    ])
+
+    await fixture.login.logout(entry)
+
+    const listRequests = fixture.api.requests.filter(request => request.method === 'GET' && request.path === '/oauth/authorizations')
+    expect(listRequests).to.have.length(2)
+    expect(listRequests[0].options?.headers?.Range).to.equal(undefined)
+    expect(listRequests[1].options?.headers?.Range).to.equal(proxyDoubledRange)
   })
 
   it('fully accumulates and validates pages before deleting an authorization', async function () {

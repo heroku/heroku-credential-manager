@@ -293,6 +293,34 @@ describe('login requests', function () {
       sinon.restore()
     })
 
+    it('resolves and binds global fetch lazily when no fetch implementation is injected', async function () {
+      const globalFetch = sinon.stub(globalThis, 'fetch').resolves(new Response(JSON.stringify({source: 'global'}), {
+        headers: {'content-type': 'application/json', 'x-fetch-source': 'global'},
+        status: 202,
+      }))
+
+      try {
+        const result = await fetchGet<{source: string}>(undefined, 'https://login.heroku.test/global', {
+          headers: {'x-request-source': 'default-fetch'},
+        })
+
+        expect(globalFetch.calledOnce).to.be.true
+        expect(globalFetch.firstCall.thisValue).to.equal(globalThis)
+        expect(globalFetch.firstCall.args[0]).to.equal('https://login.heroku.test/global')
+        const options = globalFetch.firstCall.args[1] as RequestInit
+        expect(options).to.include({method: 'GET', redirect: 'error'})
+        expect(options.headers).to.deep.include({'x-request-source': 'default-fetch'})
+        expect(options.signal).to.be.instanceOf(AbortSignal)
+        expect(result).to.deep.equal({
+          body: {source: 'global'},
+          headers: {'content-type': 'application/json', 'x-fetch-source': 'global'},
+          status: 202,
+        })
+      } finally {
+        globalFetch.restore()
+      }
+    })
+
     it('serializes POST JSON, merges headers, and returns JSON response metadata', async function () {
       const fetchStub = sinon.stub().resolves(new Response(JSON.stringify({ok: true}), {
         headers: {'content-type': 'application/json', 'x-request-id': 'request-id'},

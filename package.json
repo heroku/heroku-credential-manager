@@ -43,7 +43,7 @@
     "chai": "^4.4.1",
     "chai-as-promised": "^8.0.1",
     "eslint": "^9",
-    "eslint-config-oclif": "^6",
+    "eslint-config-oclif": "^7",
     "fs-extra": "^11.4.0",
     "mocha": "^10.8.2",
     "nock": "^14",

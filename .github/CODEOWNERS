@@ -1,4 +1,5 @@
 # Keep this file in sync with the repository-level CODEOWNERS file.
 
+#ECCN:Open Source
 #GUSINFO: Heroku FE Dev Tools,Heroku CLI & Plugins
 * @heroku/frontend-dev-tooling

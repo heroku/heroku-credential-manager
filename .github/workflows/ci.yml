@@ -16,11 +16,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: sfdc-hk-ubuntu-latest
+          - os: ubuntu-latest
             node-version: 22.x
-          - os: sfdc-hk-windows-latest
+          - os: windows-latest
             node-version: 22.x
-          - os: sfdc-hk-macos-latest
+          - os: macos-latest
             node-version: 22.x
     steps:
       - uses: actions/checkout@v7
@@ -40,7 +40,7 @@ jobs:
   # Lint runs once in its own job (eslint output is identical across OS/node),
   # concurrent with the matrix rather than as a gated step inside it.
   lint:
-    runs-on: sfdc-hk-ubuntu-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: Use Node.js
@@ -58,11 +58,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: sfdc-hk-ubuntu-latest
+          - os: ubuntu-latest
             node-version: 22.x
-          - os: sfdc-hk-windows-latest
+          - os: windows-latest
             node-version: 22.x
-          - os: sfdc-hk-macos-latest
+          - os: macos-latest
             node-version: 22.x
     steps:
       - uses: actions/checkout@v7

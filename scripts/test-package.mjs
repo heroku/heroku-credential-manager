@@ -191,7 +191,7 @@ try {
   assert.deepEqual(Object.keys(installedPackage.exports).sort(), ['.', './login', './package.json'])
   assert.deepEqual(Object.keys(installedPackage.exports['.']), ['types', 'default'])
   assert.deepEqual(Object.keys(installedPackage.exports['./login']), ['types', 'default'])
-  assert.equal(installedPackage.publishConfig.access, 'restricted')
+  assert.equal(installedPackage.publishConfig.access, 'public')
   const graphSize = assertSafeDistGraph(installedPackageRoot)
   assertLoginDeclarationSurface(installedPackageRoot)
 

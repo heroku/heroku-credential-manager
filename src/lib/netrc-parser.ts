@@ -1,8 +1,9 @@
-import debug from 'debug'
 import {execa, execaSync} from 'execa'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+
+import {credDebug} from './debug.js'
 
 export type Token = MachineToken | {content: string, type: 'other'}
 export type MachineToken = {
@@ -27,7 +28,6 @@ export type MachinesWithTokens = Machines & {
   _tokens?: Token[]
 }
 
-const credDebug = debug('heroku-credential-manager')
 const secureFileMode = 0o600
 
 function secureWriteFlags(): number {
@@ -309,8 +309,12 @@ export class Netrc {
         ? decryptFile()
         : new Promise<string>((resolve, reject) => {
           fs.readFile(this.file, {encoding: 'utf8'}, (err, data) => {
-            if (err && err.code !== 'ENOENT') reject(err)
-            debug('ENOENT')
+            if (err && err.code !== 'ENOENT') {
+              reject(err)
+              return
+            }
+
+            if (err) credDebug('netrc file %s not found; treating as empty', this.file)
             resolve(data || '')
           })
         }))

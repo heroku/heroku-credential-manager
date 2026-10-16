@@ -136,7 +136,7 @@ describe('credential-manager', function () {
       const messages: string[] = []
       const originalLog = debug.log
       const originalNamespaces = debug.disable()
-      debug.enable('heroku-credential-manager')
+      debug.enable('heroku:credential-manager')
       debug.log = (...args: unknown[]) => messages.push(args.map(String).join(' '))
       sinon.stub(MacOSHandler.prototype, 'saveAuth').throws(new Error(`failed for ${account} with ${token}`))
       sinon.stub(NetrcHandler.prototype, 'saveAuthForHosts').resolves()

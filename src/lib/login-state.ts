@@ -1,8 +1,7 @@
-import debug from 'debug'
 import * as fs from 'node:fs'
 import {join} from 'node:path'
 
-const credDebug = debug('heroku-credential-manager')
+import {credDebug} from './debug.js'
 
 const LOGIN_STATE_FILE = 'login.json'
 

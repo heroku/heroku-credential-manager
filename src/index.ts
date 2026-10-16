@@ -1,5 +1,3 @@
-import debug from 'debug'
-
 import type {AuthEntry, NetrcAuthEntry} from './lib/types.js'
 
 import {LinuxHandler} from './credential-handlers/linux-handler.js'
@@ -7,9 +5,8 @@ import {MacOSHandler} from './credential-handlers/macos-handler.js'
 import {NetrcHandler} from './credential-handlers/netrc-handler.js'
 import {WindowsHandler} from './credential-handlers/windows-handler.js'
 import {CredentialStore, getNativeCredentialStore, getStorageConfig} from './lib/credential-storage-selector.js'
+import {credDebug} from './lib/debug.js'
 import {NativeCredentialNotFoundError} from './native-credential-not-found-error.js'
-
-const credDebug = debug('heroku-credential-manager')
 
 const SERVICE_NAME = 'heroku-cli'
 
@@ -32,6 +29,7 @@ export async function saveAuth(account: string, token: string, hosts: string[], 
       const handler = getCredentialHandler(config.credentialStore)
       handler.saveAuth({account, service, token})
       nativeSuccess = true
+      credDebug('saved credential to %s', config.credentialStore)
     } catch {
       credDebug('native credential store failed during saveAuth; falling back to netrc')
     }
@@ -44,6 +42,7 @@ export async function saveAuth(account: string, token: string, hosts: string[], 
       password: token,
     }
     await netrcHandler.saveAuthForHosts(netrcAuth, hosts)
+    credDebug('saved credential to netrc for %d host(s)', hosts.length)
   } else if (hosts.length > 0) {
     await netrcHandler.removeAuthForHosts(hosts, account)
   }
@@ -66,6 +65,7 @@ export async function getAuth(account: string | undefined, host: string, service
     try {
       const handler = getCredentialHandler(config.credentialStore)
       const token = handler.getAuth(account, service)
+      credDebug('resolved credential from %s', config.credentialStore)
       return {account, token}
     } catch (error) {
       if (!(error instanceof NativeCredentialNotFoundError)) throw error
@@ -80,6 +80,7 @@ export async function getAuth(account: string | undefined, host: string, service
       throw new Error('Netrc credential does not match the requested account for host')
     }
 
+    credDebug('resolved credential from netrc for host %s', host)
     return {account: auth.login, token: auth.password}
   }
 
@@ -131,6 +132,7 @@ export async function removeAuth(
       const handler = getCredentialHandler(nativeStore)
       if (expectedToken === undefined || handler.getAuth(account, service) === expectedToken) {
         handler.removeAuth(account, service)
+        credDebug('removed credential from %s', nativeStore)
       }
     } catch (error) {
       if (!(error instanceof NativeCredentialNotFoundError)) {

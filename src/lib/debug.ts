@@ -5,7 +5,6 @@ import debug from 'debug'
  * to match the `heroku:<package>` convention used across Heroku's Node libraries
  * (e.g. `heroku:fetch:*`).
  *
- * Enable with `DEBUG=heroku:credential-manager` (or `DEBUG=heroku:*`). Keep it to
- * non-sensitive diagnostics — credential values must never be logged.
+ * Enable with `DEBUG=heroku:credential-manager` (or `DEBUG=heroku:*`).
  */
 export const credDebug = debug('heroku:credential-manager')

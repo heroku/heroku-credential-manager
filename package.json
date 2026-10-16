@@ -2,7 +2,7 @@
   "type": "module",
   "name": "@heroku/heroku-credential-manager",
   "version": "0.1.0",
-  "description": "Heroku credential management for the CLI",
+  "description": "Heroku credential management for Node.js applications",
   "author": "Heroku",
   "license": "Apache-2.0",
   "repository": {
@@ -59,7 +59,7 @@
     "execa": "^9.6.1"
   },
   "engines": {
-    "node": ">=20.5.0"
+    "node": ">=22"
   },
   "overrides": {
     "@typescript-eslint/typescript-estree": {

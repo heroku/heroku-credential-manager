@@ -4,6 +4,7 @@ import {LinuxHandler} from './credential-handlers/linux-handler.js'
 import {MacOSHandler} from './credential-handlers/macos-handler.js'
 import {NetrcHandler} from './credential-handlers/netrc-handler.js'
 import {WindowsHandler} from './credential-handlers/windows-handler.js'
+import {reportCredentialError} from './lib/credential-error-reporter.js'
 import {CredentialStore, getNativeCredentialStore, getStorageConfig} from './lib/credential-storage-selector.js'
 import {credDebug} from './lib/debug.js'
 import {NativeCredentialNotFoundError} from './native-credential-not-found-error.js'
@@ -24,14 +25,16 @@ export async function saveAuth(account: string, token: string, hosts: string[], 
   const netrcHandler = new NetrcHandler()
   let nativeSuccess = false
 
-  if (config.credentialStore) {
+  const {credentialStore} = config
+  if (credentialStore) {
     try {
-      const handler = getCredentialHandler(config.credentialStore)
+      const handler = getCredentialHandler(credentialStore)
       handler.saveAuth({account, service, token})
       nativeSuccess = true
-      credDebug('saved credential to %s', config.credentialStore)
-    } catch {
+      credDebug('saved credential to %s', credentialStore)
+    } catch (error) {
       credDebug('native credential store failed during saveAuth; falling back to netrc')
+      await reportCredentialError(error, {credentialStore, operation: 'saveAuth'})
     }
   }
 
@@ -61,14 +64,19 @@ export async function getAuth(account: string | undefined, host: string, service
   const config = getStorageConfig()
   const netrcHandler = new NetrcHandler()
 
-  if (config.credentialStore && account) {
+  const {credentialStore} = config
+  if (credentialStore && account) {
     try {
-      const handler = getCredentialHandler(config.credentialStore)
+      const handler = getCredentialHandler(credentialStore)
       const token = handler.getAuth(account, service)
-      credDebug('resolved credential from %s', config.credentialStore)
+      credDebug('resolved credential from %s', credentialStore)
       return {account, token}
     } catch (error) {
-      if (!(error instanceof NativeCredentialNotFoundError)) throw error
+      if (!(error instanceof NativeCredentialNotFoundError)) {
+        await reportCredentialError(error, {credentialStore, operation: 'getAuth'})
+        throw error
+      }
+
       credDebug('native credential was not found during getAuth; falling back to netrc')
     }
   }
@@ -96,12 +104,14 @@ export async function getAuth(account: string | undefined, host: string, service
 export async function listKeychainAccounts(service = SERVICE_NAME): Promise<string[]> {
   const config = getStorageConfig()
 
-  if (config.credentialStore) {
+  const {credentialStore} = config
+  if (credentialStore) {
     try {
-      const handler = getCredentialHandler(config.credentialStore)
+      const handler = getCredentialHandler(credentialStore)
       return handler.listAccounts(service)
-    } catch {
+    } catch (error) {
       credDebug('native credential store failed during listKeychainAccounts')
+      await reportCredentialError(error, {credentialStore, operation: 'listKeychainAccounts'})
     }
   }
 
@@ -137,6 +147,7 @@ export async function removeAuth(
     } catch (error) {
       if (!(error instanceof NativeCredentialNotFoundError)) {
         credDebug('native credential store failed during removeAuth; continuing netrc cleanup')
+        await reportCredentialError(error, {credentialStore: nativeStore, operation: 'removeAuth'})
       }
     }
   }
@@ -172,9 +183,15 @@ export {LinuxHandler} from './credential-handlers/linux-handler.js'
 export {MacOSHandler} from './credential-handlers/macos-handler.js'
 export {NetrcHandler} from './credential-handlers/netrc-handler.js'
 export {WindowsHandler} from './credential-handlers/windows-handler.js'
+export {setCredentialErrorReporter} from './lib/credential-error-reporter.js'
+export type {CredentialErrorContext, CredentialErrorOperation, CredentialErrorReporter} from './lib/credential-error-reporter.js'
+export {credentialServiceForHost, DEFAULT_API_HOST, DEFAULT_CREDENTIAL_SERVICE} from './lib/credential-service.js'
 export {CredentialStore, getNativeCredentialStore, getStorageConfig} from './lib/credential-storage-selector.js'
 export type {StorageConfig} from './lib/credential-storage-selector.js'
+export {resolveEnvAuth} from './lib/env-auth.js'
+export type {EnvAuthResolution} from './lib/env-auth.js'
 export {deleteLoginState, readLoginState, writeLoginState} from './lib/login-state.js'
+export {isMissingCredentialError} from './lib/missing-credential-error.js'
 export {Netrc, parse} from './lib/netrc-parser.js'
 export type {
   Machines,

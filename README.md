@@ -2,7 +2,7 @@
 
 A Node.js library for storing, retrieving, and removing Heroku API credentials from any Node context — CLIs, SDK consumers, scripts, and services. Originally developed for the Heroku CLI, it uses the native credential store on macOS, Windows, and GNU/Linux when available, and supports `.netrc` storage.
 
-By default it interoperates with the credentials the Heroku CLI stores (service name `heroku-cli`), so tools can share a single login; pass a custom `service` to use an isolated credential namespace.
+By default it interoperates with the credentials the Heroku CLI stores (service name `heroku-cli`), so tools can share a single login; pass a custom `service` to isolate entries in the native credential store. Note that `.netrc` entries are keyed by host and account rather than service, so netrc-backed storage is not namespaced by `service`.
 
 ## Features
 

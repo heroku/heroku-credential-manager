@@ -132,7 +132,16 @@ function bodyFrom(error: Record<string, unknown>): unknown {
   } catch {}
 }
 
-/** Converts common client error shapes to the package's stable request error. */
+/**
+ * Converts common client error shapes to the package's stable request error.
+ *
+ * The returned error is NOT scrubbed against caller-supplied sensitive values —
+ * only the inline `Bearer`/`Basic` pattern pass has run (via `LoginRequestError`
+ * with empty variants). Do not surface its output directly: route it through
+ * `sanitizePublicError`, the only in-package caller, which re-projects it with
+ * the real `sensitiveValues`. A raw, un-prefixed token in `body.message` would
+ * otherwise survive.
+ */
 export function normalizeLoginRequestError(error: unknown): Error | LoginRequestError {
   if (error instanceof LoginRequestError) return error
   if (!error || typeof error !== 'object') return error instanceof Error ? error : new Error('Login request failed')

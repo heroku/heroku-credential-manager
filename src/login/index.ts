@@ -15,6 +15,7 @@ import type {
   LoginTimers,
 } from './types.js'
 
+import {credentialServiceForHost, DEFAULT_CREDENTIAL_SERVICE} from '../lib/credential-service.js'
 import {browserLogin} from './browser.js'
 import {
   herokuApiDelete, herokuApiGet, LoginRequestError, normalizeLoginRequestError, sanitizePublicError,
@@ -29,8 +30,6 @@ import {defaultLoginStorage} from './storage.js'
 const LOGIN_TIMEOUT = 10 * 60 * 1000
 const MAX_AUTHORIZATION_PAGES = 500
 const REDACTED_TOKEN_ASTERISKS = '*'.repeat(10)
-const DEFAULT_API_HOST = 'api.heroku.com'
-const DEFAULT_CREDENTIAL_SERVICE = 'heroku-cli'
 const METHODS = new Set<LoginMethod>(['browser', 'interactive', 'sso'])
 const ALLOWED_HEROKU_DOMAINS = ['heroku.com', 'herokai.com', 'herokuspace.com', 'herokudev.com']
 
@@ -173,7 +172,7 @@ function credentialService(value: string | undefined, apiHost: string): string {
     return value
   }
 
-  return apiHost === DEFAULT_API_HOST ? DEFAULT_CREDENTIAL_SERVICE : `${DEFAULT_CREDENTIAL_SERVICE}@${apiHost}`
+  return credentialServiceForHost(apiHost)
 }
 
 function resolveConfig(config: LoginConfig, environment: LoginEnvironment): ResolvedConfig {

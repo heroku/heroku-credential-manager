@@ -112,6 +112,34 @@ describe('login requests', function () {
       expect((error.cause as Error).message).to.equal('TLS [SCRUBBED]')
     })
 
+    it('scrubs inline Bearer credentials from transport messages even when not supplied as sensitive values', async function () {
+      const token = 'unlisted-abc123XYZ'
+      const transportError = new Error(`authorization failed: Bearer ${token}`, {
+        cause: new Error(`retry with Bearer ${token}`),
+      })
+      const error = await requestError(transportError, [])
+      expect(error.message).to.equal('authorization failed: [SCRUBBED]')
+      expect((error.cause as Error).message).to.equal('retry with [SCRUBBED]')
+      expectNoSensitiveSurface(error, token)
+    })
+
+    it('scrubs inline Basic credentials from allowlisted response body fields without an enumerated secret', async function () {
+      const token = 'dGhpcy1pcy1zZWNyZXQ='
+      const api: HerokuApiClientLike = {
+        async delete<T>() {
+          return response(undefined, 204) as HerokuApiResponse<T>
+        },
+        async get<T>() {
+          return response({message: `rejected Basic ${token}`}, 401) as HerokuApiResponse<T>
+        },
+      }
+      const error = await rejected(herokuApiGet(api, '/account', undefined, [])) as LoginRequestError
+      expect(error).to.be.instanceOf(LoginRequestError)
+      expect(error.body?.message).to.equal('rejected [SCRUBBED]')
+      expect(error.message).to.equal('rejected [SCRUBBED]')
+      expectNoSensitiveSurface(error, token)
+    })
+
     it('drops arbitrary adapter metadata when credentials were supplied', async function () {
       const sensitiveValue = 'metadata-token'
       const transportError = Object.assign(new Error('proxy certificate rejected'), {

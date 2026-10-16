@@ -4,6 +4,8 @@ import type {
   FetchLike, HerokuApiClientLike, HerokuApiRequestOptions, HerokuApiResponse,
 } from './types.js'
 
+import {scrubText, sensitiveVariants} from '../lib/scrub.js'
+
 const require = createRequire(import.meta.url)
 const packageMetadata = require('../../package.json') as {name: string, version: string}
 const USER_AGENT = `${packageMetadata.name}/${packageMetadata.version} node-${process.version}`
@@ -27,26 +29,11 @@ type ProjectionContext = {
 }
 
 const MAX_CAUSE_DEPTH = 8
-const SCRUBBED = '[SCRUBBED]'
 
 export type LoginRequestErrorBody = {
   id?: string
   message?: string
   resource?: string
-}
-
-function sensitiveVariants(sensitiveValues: readonly string[]): string[] {
-  return [...new Set(sensitiveValues.flatMap(value => {
-    const normalized = value.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
-    const crlfNormalized = normalized.replaceAll('\n', '\r\n')
-    return [value, normalized, crlfNormalized].flatMap(variant => [variant, Buffer.from(variant, 'utf8').toString('base64')])
-  }).filter(Boolean))].sort((left, right) => right.length - left.length)
-}
-
-function scrubSensitiveText(text: string, variants: readonly string[]): string {
-  let scrubbed = text
-  for (const value of variants) scrubbed = scrubbed.replaceAll(value, SCRUBBED)
-  return scrubbed
 }
 
 function fieldFrom(body: ErrorBody, field: keyof ErrorBody): unknown {
@@ -63,7 +50,7 @@ function publicBody(body: unknown, variants: readonly string[] = []): LoginReque
   const result: LoginRequestErrorBody = {}
   for (const field of ['id', 'message', 'resource'] as const) {
     const value = fieldFrom(candidate, field)
-    if (typeof value === 'string') result[field] = scrubSensitiveText(value, variants)
+    if (typeof value === 'string') result[field] = scrubText(value, variants)
   }
 
   return Object.keys(result).length > 0 ? result : undefined
@@ -99,7 +86,7 @@ export class LoginRequestError extends Error {
   constructor(status: number, body?: unknown, message?: string, sensitiveValues: readonly string[] = []) {
     const variants = sensitiveVariants(sensitiveValues)
     const safeBody = publicBody(body, variants)
-    const safeMessage = typeof message === 'string' ? scrubSensitiveText(message, variants) : undefined
+    const safeMessage = typeof message === 'string' ? scrubText(message, variants) : undefined
     super(safeMessage ?? bodyMessage(safeBody) ?? `Login request failed with status ${status}`)
     this.body = safeBody
     this.id = safeBody?.id
@@ -181,7 +168,7 @@ function safeCause(
   seen: Set<Error>,
   depth: number,
 ): Error | string | undefined {
-  if (typeof cause === 'string') return scrubSensitiveText(cause, variants)
+  if (typeof cause === 'string') return scrubText(cause, variants)
   if (!(cause instanceof Error)) return
   if (depth >= MAX_CAUSE_DEPTH) return new Error('Transport error cause depth exceeded')
   return safeErrorProjection(cause, variants, {depth, preserveCause: true, seen})
@@ -196,8 +183,8 @@ function safeErrorProjection(
   if (projection.seen.has(error)) return new Error('Cyclic transport error cause')
   projection.seen.add(error)
 
-  const message = scrubSensitiveText(errorString(error, 'message', 'Login request failed'), variants)
-  const name = scrubSensitiveText(errorString(error, 'name', 'Error'), variants)
+  const message = scrubText(errorString(error, 'message', 'Login request failed'), variants)
+  const name = scrubText(errorString(error, 'name', 'Error'), variants)
   const cause = projection.preserveCause
     ? safeCause(errorCause(error), variants, projection.seen, projection.depth + 1)
     : undefined

@@ -27,6 +27,18 @@ describe('credential-error-reporter', function () {
     await reportCredentialError(new Error('x'), context)
   })
 
+  it('accepts a synchronous reporter that returns a value', async function () {
+    const seen: unknown[] = []
+    // Compile-time guard: a reporter whose body returns a non-void value (here
+    // Array.prototype.push returns a number) must satisfy CredentialErrorReporter.
+    setCredentialErrorReporter(error => seen.push(error))
+    const error = new Error('boom')
+
+    await reportCredentialError(error, context)
+
+    expect(seen).to.deep.equal([error])
+  })
+
   it('swallows errors thrown by the reporter', async function () {
     setCredentialErrorReporter(() => {
       throw new Error('reporter failed')

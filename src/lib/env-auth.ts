@@ -19,8 +19,8 @@ export type EnvAuthWarningCode = 'HEROKU_API_TOKEN_WITHOUT_KEY'
  * responsibility; `resolveEnvAuth` performs no logging or other I/O.
  */
 export type EnvAuthWarning = {
-  code: EnvAuthWarningCode
-  message: string
+  readonly code: EnvAuthWarningCode
+  readonly message: string
 }
 
 /**

@@ -20,13 +20,14 @@ export type CredentialErrorContext = {
  * CLI) may register a reporter to surface these otherwise-internal failures to
  * wherever it collects diagnostics.
  *
- * The return type is `void | PromiseLike<unknown>` rather than `Promise<void>`
- * so that any callback shape is accepted — a synchronous side-effect that
- * returns a value, or a promise of anything. The reporter is `await`ed on the
- * failure path (see {@link reportCredentialError}), so it MUST be non-blocking:
- * a reporter that hangs will stall credential resolution.
+ * The return type is `unknown` so that any callback shape is accepted — a
+ * synchronous side-effect that returns a value, or a promise of anything (a
+ * `void` or `Promise<void> | void` return type would reject a reporter that
+ * happens to return a value). The reporter is `await`ed on the failure path
+ * (see {@link reportCredentialError}), so it MUST be non-blocking: a reporter
+ * that hangs will stall credential resolution.
  */
-export type CredentialErrorReporter = (error: unknown, context: CredentialErrorContext) => PromiseLike<unknown> | void
+export type CredentialErrorReporter = (error: unknown, context: CredentialErrorContext) => unknown
 
 let reporter: CredentialErrorReporter | undefined
 

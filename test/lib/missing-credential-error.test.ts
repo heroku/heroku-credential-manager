@@ -1,9 +1,13 @@
 import {expect} from 'chai'
 
-import {isMissingCredentialError} from '../../src/lib/missing-credential-error.js'
+import {isMissingCredentialError, MissingCredentialError} from '../../src/lib/missing-credential-error.js'
 import {NativeCredentialNotFoundError} from '../../src/native-credential-not-found-error.js'
 
 describe('isMissingCredentialError', function () {
+  it('recognizes MissingCredentialError', function () {
+    expect(isMissingCredentialError(new MissingCredentialError('No auth found'))).to.be.true
+  })
+
   it('recognizes NativeCredentialNotFoundError', function () {
     expect(isMissingCredentialError(new NativeCredentialNotFoundError('not found'))).to.be.true
   })

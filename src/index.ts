@@ -5,11 +5,13 @@ import {MacOSHandler} from './credential-handlers/macos-handler.js'
 import {NetrcHandler} from './credential-handlers/netrc-handler.js'
 import {WindowsHandler} from './credential-handlers/windows-handler.js'
 import {reportCredentialError} from './lib/credential-error-reporter.js'
+import {DEFAULT_CREDENTIAL_SERVICE} from './lib/credential-service.js'
 import {CredentialStore, getNativeCredentialStore, getStorageConfig} from './lib/credential-storage-selector.js'
 import {credDebug} from './lib/debug.js'
+import {MissingCredentialError} from './lib/missing-credential-error.js'
 import {NativeCredentialNotFoundError} from './native-credential-not-found-error.js'
 
-const SERVICE_NAME = 'heroku-cli'
+const SERVICE_NAME = DEFAULT_CREDENTIAL_SERVICE
 
 /**
  * Saves authentication credentials to the native credential store (if available) or .netrc file.
@@ -85,14 +87,14 @@ export async function getAuth(account: string | undefined, host: string, service
 
   if (auth.login && auth.password) {
     if (account && auth.login !== account) {
-      throw new Error('Netrc credential does not match the requested account for host')
+      throw new MissingCredentialError('Netrc credential does not match the requested account for host')
     }
 
     credDebug('resolved credential from netrc for host %s', host)
     return {account: auth.login, token: auth.password}
   }
 
-  throw new Error('No auth found')
+  throw new MissingCredentialError('No auth found')
 }
 
 /**
@@ -189,9 +191,11 @@ export {credentialServiceForHost, DEFAULT_API_HOST, DEFAULT_CREDENTIAL_SERVICE} 
 export {CredentialStore, getNativeCredentialStore, getStorageConfig} from './lib/credential-storage-selector.js'
 export type {StorageConfig} from './lib/credential-storage-selector.js'
 export {resolveEnvAuth} from './lib/env-auth.js'
-export type {EnvAuthResolution} from './lib/env-auth.js'
+export type {
+  EnvAuthResolution, EnvAuthSource, EnvAuthWarning, EnvAuthWarningCode,
+} from './lib/env-auth.js'
 export {deleteLoginState, readLoginState, writeLoginState} from './lib/login-state.js'
-export {isMissingCredentialError} from './lib/missing-credential-error.js'
+export {isMissingCredentialError, MissingCredentialError} from './lib/missing-credential-error.js'
 export {Netrc, parse} from './lib/netrc-parser.js'
 export type {
   Machines,

@@ -10,7 +10,10 @@ describe('resolveEnvAuth', function () {
   it('warns and returns no token when HEROKU_API_TOKEN is set without HEROKU_API_KEY', function () {
     expect(resolveEnvAuth({HEROKU_API_TOKEN: 'tok'})).to.deep.equal({
       token: undefined,
-      warning: 'HEROKU_API_TOKEN is set but you probably meant HEROKU_API_KEY',
+      warning: {
+        code: 'HEROKU_API_TOKEN_WITHOUT_KEY',
+        message: 'HEROKU_API_TOKEN is set but you probably meant HEROKU_API_KEY',
+      },
     })
   })
 

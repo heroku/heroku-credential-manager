@@ -1,6 +1,7 @@
 import type {NetrcAuthEntry} from '../lib/types.js'
 
 import {credDebug} from '../lib/debug.js'
+import {MissingCredentialError} from '../lib/missing-credential-error.js'
 import {Netrc} from '../lib/netrc-parser.js'
 
 export class NetrcHandler {
@@ -21,7 +22,7 @@ export class NetrcHandler {
     await this.netrc.load()
     const auth = this.netrc.machines[host]
     if (!auth) {
-      throw new Error(`No auth found for ${host}`)
+      throw new MissingCredentialError(`No auth found for ${host}`)
     }
 
     return auth

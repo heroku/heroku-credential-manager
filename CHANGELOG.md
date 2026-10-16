@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0](https://github.com/heroku/heroku-credential-manager/compare/heroku-credential-manager-v0.1.0...heroku-credential-manager-v0.2.0) (2026-10-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* Node.js 20 is no longer supported; the minimum is now Node 22.
+
+### Features
+
+* harden credential manager — shared scrubber, debug namespace, Node 22 baseline ([#77](https://github.com/heroku/heroku-credential-manager/issues/77)) ([3f1ef99](https://github.com/heroku/heroku-credential-manager/commit/3f1ef994c59f0b3aa2c244814537a4d8a6fa5e1d))
+
+
+### Dependencies
+
+* bump source-map-js from 1.2.1 to 1.2.2 ([#72](https://github.com/heroku/heroku-credential-manager/issues/72)) ([f0b476f](https://github.com/heroku/heroku-credential-manager/commit/f0b476f5a743686e363a5db8abc157d4cb323831))
+
 ## 0.1.0 (2026-09-30)
 
 

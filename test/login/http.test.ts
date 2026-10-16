@@ -123,6 +123,14 @@ describe('login requests', function () {
       expectNoSensitiveSurface(error, token)
     })
 
+    it('scrubs the whole inline credential even when the token contains out-of-class characters', async function () {
+      const token = 'abc:def-secret!value'
+      const transportError = new Error(`authorization failed: Bearer ${token}`)
+      const error = await requestError(transportError, [])
+      expect(error.message).to.equal('authorization failed: [SCRUBBED]')
+      expectNoSensitiveSurface(error, token)
+    })
+
     it('scrubs inline Basic credentials from allowlisted response body fields without an enumerated secret', async function () {
       const token = 'dGhpcy1pcy1zZWNyZXQ='
       const api: HerokuApiClientLike = {

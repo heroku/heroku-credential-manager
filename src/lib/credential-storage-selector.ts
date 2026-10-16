@@ -1,5 +1,7 @@
 import childProcess from 'node:child_process'
 
+import {credDebug} from './debug.js'
+
 export const CredentialStore = {
   LinuxSecretService: 'linux-secret-service',
   MacOSKeychain: 'macos-keychain',
@@ -67,6 +69,7 @@ export function getStorageConfig(): StorageConfig {
   const netrcWriteLegacy = process.env.HEROKU_NETRC_WRITE?.toLowerCase() === 'true'
 
   if (netrcWriteLegacy) {
+    credDebug('HEROKU_NETRC_WRITE=true: using netrc-only storage')
     return {
       credentialStore: null,
       useNetrc: true,
@@ -74,6 +77,7 @@ export function getStorageConfig(): StorageConfig {
   }
 
   const nativeCredentialStore = getNativeCredentialStore()
+  credDebug('selected storage: %s', nativeCredentialStore ?? 'netrc (no native store available)')
 
   return {
     credentialStore: nativeCredentialStore,

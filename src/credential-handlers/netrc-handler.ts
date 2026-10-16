@@ -1,10 +1,7 @@
-import debug from 'debug'
-
 import type {NetrcAuthEntry} from '../lib/types.js'
 
+import {credDebug} from '../lib/debug.js'
 import {Netrc} from '../lib/netrc-parser.js'
-
-const credDebug = debug('heroku-credential-manager')
 
 export class NetrcHandler {
   public readonly netrc: Netrc

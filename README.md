@@ -16,7 +16,7 @@ By default it interoperates with the credentials the Heroku CLI stores (service 
 
 ### Requirements
 
-Node.js 22.19.0 or later is required.
+Node.js 22 or later is required.
 
 ### Installation
 

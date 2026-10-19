@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/heroku/heroku-credential-manager/compare/heroku-credential-manager-v0.2.0...heroku-credential-manager-v0.2.1) (2026-10-19)
+
+
+### Features
+
+* add auth-policy helpers and an injectable credential error reporter ([#79](https://github.com/heroku/heroku-credential-manager/issues/79)) ([81ca08d](https://github.com/heroku/heroku-credential-manager/commit/81ca08d5b7a152b7830b97387a69b6c0441f521c))
+
 ## [0.2.0](https://github.com/heroku/heroku-credential-manager/compare/heroku-credential-manager-v0.1.0...heroku-credential-manager-v0.2.0) (2026-10-16)
 
 
